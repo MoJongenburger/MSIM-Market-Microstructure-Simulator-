@@ -46,6 +46,7 @@ endfunction()
 # ---------------- Library: msim ----------------
 add_library(msim
   src/book.cpp
+  src/matching_engine.cpp
 )
 
 target_include_directories(msim PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -70,6 +71,7 @@ FetchContent_MakeAvailable(googletest)
 add_executable(msim_tests
   tests/test_types.cpp
   tests/test_book.cpp
+  tests/test_matching.cpp
 )
 
 target_link_libraries(msim_tests PRIVATE msim GTest::gtest_main)
