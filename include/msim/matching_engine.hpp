@@ -31,6 +31,10 @@ public:
   const RuleSet& rules() const noexcept { return rules_; }
   RuleSet& rules_mut() noexcept { return rules_; }
 
+  // Step 12: explicit phase controls (used by simulator/session schedule)
+  void start_trading_at_last(Ts end_ts) noexcept;
+  void start_closing_auction(Ts end_ts) noexcept;
+
   MatchResult process(Order incoming);
 
 private:
@@ -38,24 +42,25 @@ private:
   RuleSet rules_{};
   TradeId next_trade_id_{1};
 
-  // Auction state
+  // Auction/TAL state
   std::vector<Order> auction_queue_{};
   Ts auction_end_ts_{0};
+  Ts tal_end_ts_{0};
 
   MatchResult process_market(Order incoming);
   MatchResult process_limit(Order incoming);
 
   Qty available_liquidity(const Order& taker) const noexcept;
 
-  // Step 10 band helpers
+  // Band helpers
   std::optional<Price> reference_price() const noexcept;
   std::optional<Price> first_execution_price(const Order& incoming) const noexcept;
   bool breaches_price_band(Price exec_px, Price ref_px) const noexcept;
   bool should_trigger_volatility_auction(const Order& incoming) const noexcept;
 
-  // Step 11 auction helpers
+  // Auction helpers (call auction)
   MatchResult queue_in_auction(Order incoming);
-  std::vector<Trade> uncross_auction(Ts uncross_ts); // <-- replaces replay
+  std::vector<Trade> uncross_auction(Ts uncross_ts);
 
   std::optional<Price> compute_clearing_price() const noexcept;
   Qty executable_volume_at(Price px) const noexcept;
