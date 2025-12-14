@@ -20,10 +20,12 @@ enum class RejectReason : uint8_t {
   InvalidOrder,
   MarketHalted,
 
-  // Step 7 additions
   PriceNotOnTick,
   QtyNotOnLot,
-  QtyBelowMinimum
+  QtyBelowMinimum,
+
+  // Step 9
+  SelfTradePrevented
 };
 
 struct RuleDecision {
@@ -31,14 +33,21 @@ struct RuleDecision {
   RejectReason reason{RejectReason::None};
 };
 
+enum class StpMode : uint8_t {
+  None = 0,
+  CancelTaker = 1,
+  CancelMaker = 2
+};
+
 struct RulesConfig {
   bool enforce_halt{true};
 
-  // Step 7 config: ticks and lots are in "integer ticks" world.
-  // Example: if 1 tick = $0.01, then price=12345 means $123.45.
-  Price tick_size_ticks{1}; // e.g., 1 means any integer tick is fine
-  Qty   lot_size{1};        // e.g., 10 means qty must be multiple of 10
-  Qty   min_qty{1};         // e.g., 1 share minimum
+  Price tick_size_ticks{1};
+  Qty   lot_size{1};
+  Qty   min_qty{1};
+
+  // Step 9
+  StpMode stp{StpMode::None};
 };
 
 class RuleSet {
