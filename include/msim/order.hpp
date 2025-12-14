@@ -28,5 +28,16 @@ struct Order {
   MarketStyle mkt_style{MarketStyle::PureMarket};
 };
 
-} // namespace msim
+// Validation used by RuleSet and engine
+inline constexpr bool is_valid_order(const Order& o) noexcept {
+  if (o.id == 0) return false;
+  if (o.qty <= 0) return false;
 
+  if (o.type == OrderType::Limit) {
+    if (o.price <= 0) return false;
+  }
+  // Market orders can have price=0 (ignored)
+  return true;
+}
+
+} // namespace msim
