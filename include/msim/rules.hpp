@@ -12,7 +12,7 @@ namespace msim {
 enum class MarketPhase : uint8_t {
   Continuous = 0,
   Halted     = 1,
-  Auction    = 2
+  Auction    = 2   // used for volatility auction in Step 10
 };
 
 enum class RejectReason : uint8_t {
@@ -24,7 +24,6 @@ enum class RejectReason : uint8_t {
   QtyNotOnLot,
   QtyBelowMinimum,
 
-  // Step 9
   SelfTradePrevented
 };
 
@@ -42,12 +41,23 @@ enum class StpMode : uint8_t {
 struct RulesConfig {
   bool enforce_halt{true};
 
+  // Tick/lot rules (Step 7)
   Price tick_size_ticks{1};
   Qty   lot_size{1};
   Qty   min_qty{1};
 
-  // Step 9
+  // STP (Step 9)
   StpMode stp{StpMode::None};
+
+  // Step 10: price bands + volatility interruption
+  bool enable_price_bands{true};
+  bool enable_volatility_interruption{true};
+
+  // Band width in basis points (bps). Example: 1250 bps = 12.5%
+  int32_t band_bps{1250};
+
+  // Volatility auction duration (ns). Example: 5 seconds = 5e9 ns
+  Ts vol_auction_duration_ns{5'000'000'000LL};
 };
 
 class RuleSet {
