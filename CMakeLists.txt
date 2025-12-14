@@ -15,8 +15,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # -------- Library target (headers now, sources later) --------
-add_library(msim INTERFACE)
-target_include_directories(msim INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_library(msim
+  src/book.cpp
+)
+
+target_include_directories(msim PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+msim_set_warnings(msim)
+msim_enable_sanitizers(msim)
+
 
 # -------- Warnings (high-signal for admissions) --------
 function(msim_set_warnings target)
@@ -62,7 +68,9 @@ FetchContent_MakeAvailable(googletest)
 
 add_executable(msim_tests
   tests/test_types.cpp
+  tests/test_book.cpp
 )
+
 
 target_link_libraries(msim_tests PRIVATE msim GTest::gtest_main)
 msim_set_warnings(msim_tests)
