@@ -87,6 +87,7 @@ add_executable(msim_tests
   tests/test_simulator.cpp
   tests/test_rules.cpp
   tests/test_order_types.cpp
+  tests/test_stp.cpp
 )
 
 target_link_libraries(msim_tests PRIVATE msim GTest::gtest_main)
