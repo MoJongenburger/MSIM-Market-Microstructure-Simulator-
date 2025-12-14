@@ -38,14 +38,25 @@ private:
   RuleSet rules_{};
   TradeId next_trade_id_{1};
 
+  // Step 10: volatility auction queue
+  std::vector<Order> auction_queue_{};
+  Ts auction_end_ts_{0};
+  bool replaying_auction_{false};
+
   MatchResult process_market(Order incoming);
   MatchResult process_limit(Order incoming);
 
+  // Step 8 FOK helper
   Qty available_liquidity(const Order& taker) const noexcept;
 
-  // Step 9: check front-of-queue maker owner for the next executable price level
-  std::optional<OwnerId> next_maker_owner_for(const Order& taker) const noexcept;
-  bool cancel_next_maker_if_self_trade(const Order& taker);
+  // Step 10: band/auction helpers
+  std::optional<Price> reference_price() const noexcept;
+  std::optional<Price> first_execution_price(const Order& incoming) const noexcept;
+  bool breaches_price_band(Price exec_px, Price ref_px) const noexcept;
+
+  bool should_trigger_volatility_auction(const Order& incoming) const noexcept;
+  MatchResult queue_in_auction(Order incoming);
+  std::vector<Trade> replay_auction_queue(Ts replay_ts);
 
   void match_buy(MatchResult& out, Order& taker);
   void match_sell(MatchResult& out, Order& taker);
