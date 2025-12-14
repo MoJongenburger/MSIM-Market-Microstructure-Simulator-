@@ -1,6 +1,7 @@
 #include "msim/matching_engine.hpp"
 #include <algorithm>
 #include <set>
+#include <cstdlib> // std::abs
 
 namespace msim {
 
@@ -16,6 +17,32 @@ void MatchingEngine::start_trading_at_last(Ts end_ts) noexcept {
 void MatchingEngine::start_closing_auction(Ts end_ts) noexcept {
   auction_end_ts_ = end_ts;
   rules_.set_phase(MarketPhase::ClosingAuction);
+}
+
+std::vector<Trade> MatchingEngine::flush(Ts ts) {
+  std::vector<Trade> out;
+
+  // TAL expiry -> back to Continuous (session controller decides next phase)
+  if (rules_.phase() == MarketPhase::TradingAtLast && tal_end_ts_ > 0 && ts >= tal_end_ts_) {
+    rules_.set_phase(MarketPhase::Continuous);
+  }
+
+  // Auction expiry -> uncross (Auction => Continuous, ClosingAuction => Closed)
+  if ((rules_.phase() == MarketPhase::Auction || rules_.phase() == MarketPhase::ClosingAuction) &&
+      auction_end_ts_ > 0 && ts >= auction_end_ts_) {
+
+    out = uncross_auction(auction_end_ts_);
+
+    if (rules_.phase() == MarketPhase::ClosingAuction) {
+      rules_.set_phase(MarketPhase::Closed);
+    } else {
+      rules_.set_phase(MarketPhase::Continuous);
+    }
+
+    rules_.on_trades(out);
+  }
+
+  return out;
 }
 
 Trade MatchingEngine::make_trade(Ts ts, Price px, Qty q, OrderId maker, OrderId taker) {
@@ -214,6 +241,10 @@ std::vector<Trade> MatchingEngine::uncross_auction(Ts uncross_ts) {
 MatchResult MatchingEngine::process(Order incoming) {
   MatchResult out{};
 
+  // Step 13: finalize any due phase endings BEFORE processing this message
+  auto flushed = flush(incoming.ts);
+  out.trades.insert(out.trades.end(), flushed.begin(), flushed.end());
+
   const auto decision = rules_.pre_accept(incoming);
   if (!decision.accept) {
     out.status = OrderStatus::Rejected;
@@ -226,53 +257,37 @@ MatchResult MatchingEngine::process(Order incoming) {
 
   // Trading-at-Last: only trade at last trade price
   if (rules_.phase() == MarketPhase::TradingAtLast) {
-    if (incoming.ts >= tal_end_ts_) {
-      // If TAL window elapsed, move to closing auction automatically (if scheduled) or close
-      // Here: default transition -> ClosingAuction with same timestamp end (caller should set proper end)
-      rules_.set_phase(MarketPhase::ClosingAuction);
-      auction_end_ts_ = incoming.ts + 5'000'000'000LL; // default 5s; override via start_closing_auction()
-    } else {
-      const auto last = rules_.last_trade_price();
-      if (!last) {
-        out.status = OrderStatus::Rejected;
-        out.reject_reason = RejectReason::NoReferencePrice;
-        return out;
-      }
-
-      if (incoming.type == OrderType::Limit && incoming.price != *last) {
-        out.status = OrderStatus::Rejected;
-        out.reject_reason = RejectReason::PriceNotAtLast;
-        return out;
-      }
-
-      // Market orders become limit at last
-      incoming.type = OrderType::Limit;
-      incoming.price = *last;
-
-      // Proceed with normal limit handling at that fixed price
-      auto r = process_limit(std::move(incoming));
-      out.trades = std::move(r.trades);
-      out.resting = r.resting;
-      out.filled_qty = r.filled_qty;
-      rules_.on_trades(out.trades);
+    const auto last = rules_.last_trade_price();
+    if (!last) {
+      out.status = OrderStatus::Rejected;
+      out.reject_reason = RejectReason::NoReferencePrice;
       return out;
     }
+
+    if (incoming.type == OrderType::Limit && incoming.price != *last) {
+      out.status = OrderStatus::Rejected;
+      out.reject_reason = RejectReason::PriceNotAtLast;
+      return out;
+    }
+
+    // Market orders become limit at last
+    incoming.type = OrderType::Limit;
+    incoming.price = *last;
+
+    auto r = process_limit(std::move(incoming));
+    out.trades.insert(out.trades.end(), r.trades.begin(), r.trades.end());
+    out.resting = r.resting;
+
+    out.filled_qty = 0;
+    for (const auto& tr : out.trades) out.filled_qty += tr.qty;
+
+    rules_.on_trades(out.trades);
+    return out;
   }
 
-  // Any auction phase: queue until end, then uncross
+  // Auction phases: if still in auction at this timestamp, queue (flush already handled any expiry)
   if (rules_.phase() == MarketPhase::Auction || rules_.phase() == MarketPhase::ClosingAuction) {
-    if (incoming.ts < auction_end_ts_) {
-      return queue_in_auction(std::move(incoming));
-    }
-
-    auto uncross_trades = uncross_auction(auction_end_ts_);
-    out.trades.insert(out.trades.end(), uncross_trades.begin(), uncross_trades.end());
-
-    if (rules_.phase() == MarketPhase::ClosingAuction) {
-      rules_.set_phase(MarketPhase::Closed);
-    } else {
-      rules_.set_phase(MarketPhase::Continuous);
-    }
+    return queue_in_auction(std::move(incoming));
   }
 
   // Volatility trigger only in continuous
