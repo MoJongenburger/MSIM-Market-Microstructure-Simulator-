@@ -71,7 +71,6 @@ enable_testing()
 
 include(FetchContent)
 
-# Recommended for MSVC CRT compatibility
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 
 FetchContent_Declare(
@@ -87,6 +86,7 @@ add_executable(msim_tests
   tests/test_cancel_modify.cpp
   tests/test_simulator.cpp
   tests/test_rules.cpp
+  tests/test_order_types.cpp
 )
 
 target_link_libraries(msim_tests PRIVATE msim GTest::gtest_main)
