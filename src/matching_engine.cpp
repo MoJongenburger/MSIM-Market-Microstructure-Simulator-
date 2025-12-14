@@ -1,12 +1,21 @@
 #include "msim/matching_engine.hpp"
 #include <algorithm>
-#include <map>
 #include <set>
 
 namespace msim {
 
 static Price mul_div_bps(Price x, int32_t num_bps, int32_t den_bps) noexcept {
   return static_cast<Price>((static_cast<int64_t>(x) * num_bps) / den_bps);
+}
+
+void MatchingEngine::start_trading_at_last(Ts end_ts) noexcept {
+  tal_end_ts_ = end_ts;
+  rules_.set_phase(MarketPhase::TradingAtLast);
+}
+
+void MatchingEngine::start_closing_auction(Ts end_ts) noexcept {
+  auction_end_ts_ = end_ts;
+  rules_.set_phase(MarketPhase::ClosingAuction);
 }
 
 Trade MatchingEngine::make_trade(Ts ts, Price px, Qty q, OrderId maker, OrderId taker) {
@@ -102,10 +111,8 @@ Qty MatchingEngine::executable_volume_at(Price px) const noexcept {
   Qty buy = 0;
   Qty sell = 0;
 
-  // Include auction queue orders
   for (const auto& o : auction_queue_) {
     if (o.type == OrderType::Market) {
-      // Interpret market as infinitely aggressive; for volume calc count them always
       if (o.side == Side::Buy) buy += o.qty;
       else sell += o.qty;
       continue;
@@ -123,16 +130,12 @@ Qty MatchingEngine::executable_volume_at(Price px) const noexcept {
 std::optional<Price> MatchingEngine::compute_clearing_price() const noexcept {
   if (auction_queue_.empty()) return std::nullopt;
 
-  // Candidate prices come from limit prices in the auction queue.
-  // (Market orders don't introduce a price level.)
   std::set<Price> candidates;
   for (const auto& o : auction_queue_) {
     if (o.type == OrderType::Limit) candidates.insert(o.price);
   }
   if (candidates.empty()) return std::nullopt;
 
-  // Choose price that maximizes executable volume.
-  // Tie-break: pick price closest to reference (if available), else lowest price.
   const auto ref = reference_price();
   Qty best_vol = -1;
   Price best_px = *candidates.begin();
@@ -168,28 +171,22 @@ std::vector<Trade> MatchingEngine::uncross_auction(Ts uncross_ts) {
   }
   const Price clearing_px = *px_opt;
 
-  // Partition into aggressive buys/sells vs clearing price
   std::vector<Order> buys;
   std::vector<Order> sells;
-  buys.reserve(auction_queue_.size());
-  sells.reserve(auction_queue_.size());
 
-  for (auto& o : auction_queue_) {
+  for (const auto& o : auction_queue_) {
     Order copy = o;
     copy.ts = uncross_ts;
 
     if (copy.type == OrderType::Market) {
-      // Market participates always
       if (copy.side == Side::Buy) buys.push_back(copy);
       else sells.push_back(copy);
     } else {
-      // Limit participates if crosses clearing price
       if (copy.side == Side::Buy && copy.price >= clearing_px) buys.push_back(copy);
       if (copy.side == Side::Sell && copy.price <= clearing_px) sells.push_back(copy);
     }
   }
 
-  // Deterministic priority: timestamp then order id
   auto pri = [](const Order& a, const Order& b) {
     if (a.ts != b.ts) return a.ts < b.ts;
     return a.id < b.id;
@@ -205,12 +202,11 @@ std::vector<Trade> MatchingEngine::uncross_auction(Ts uncross_ts) {
     if (s.qty <= 0) { ++j; continue; }
 
     const Qty q = std::min(b.qty, s.qty);
-    trades.push_back(make_trade(uncross_ts, clearing_px, q, s.id, b.id)); // maker=sell, taker=buy (convention)
+    trades.push_back(make_trade(uncross_ts, clearing_px, q, s.id, b.id));
     b.qty -= q;
     s.qty -= q;
   }
 
-  // Clear auction queue after uncross
   auction_queue_.clear();
   return trades;
 }
@@ -225,26 +221,68 @@ MatchResult MatchingEngine::process(Order incoming) {
     return out;
   }
 
-  // If in auction: queue until end, then uncross
-  if (rules_.phase() == MarketPhase::Auction) {
+  // Closed: ignore everything (accepted but no action)
+  if (rules_.phase() == MarketPhase::Closed) return out;
+
+  // Trading-at-Last: only trade at last trade price
+  if (rules_.phase() == MarketPhase::TradingAtLast) {
+    if (incoming.ts >= tal_end_ts_) {
+      // If TAL window elapsed, move to closing auction automatically (if scheduled) or close
+      // Here: default transition -> ClosingAuction with same timestamp end (caller should set proper end)
+      rules_.set_phase(MarketPhase::ClosingAuction);
+      auction_end_ts_ = incoming.ts + 5'000'000'000LL; // default 5s; override via start_closing_auction()
+    } else {
+      const auto last = rules_.last_trade_price();
+      if (!last) {
+        out.status = OrderStatus::Rejected;
+        out.reject_reason = RejectReason::NoReferencePrice;
+        return out;
+      }
+
+      if (incoming.type == OrderType::Limit && incoming.price != *last) {
+        out.status = OrderStatus::Rejected;
+        out.reject_reason = RejectReason::PriceNotAtLast;
+        return out;
+      }
+
+      // Market orders become limit at last
+      incoming.type = OrderType::Limit;
+      incoming.price = *last;
+
+      // Proceed with normal limit handling at that fixed price
+      auto r = process_limit(std::move(incoming));
+      out.trades = std::move(r.trades);
+      out.resting = r.resting;
+      out.filled_qty = r.filled_qty;
+      rules_.on_trades(out.trades);
+      return out;
+    }
+  }
+
+  // Any auction phase: queue until end, then uncross
+  if (rules_.phase() == MarketPhase::Auction || rules_.phase() == MarketPhase::ClosingAuction) {
     if (incoming.ts < auction_end_ts_) {
       return queue_in_auction(std::move(incoming));
     }
 
-    // Uncross at auction_end_ts_ then return to continuous
     auto uncross_trades = uncross_auction(auction_end_ts_);
     out.trades.insert(out.trades.end(), uncross_trades.begin(), uncross_trades.end());
-    rules_.set_phase(MarketPhase::Continuous);
+
+    if (rules_.phase() == MarketPhase::ClosingAuction) {
+      rules_.set_phase(MarketPhase::Closed);
+    } else {
+      rules_.set_phase(MarketPhase::Continuous);
+    }
   }
 
-  // Volatility trigger in continuous
+  // Volatility trigger only in continuous
   if (should_trigger_volatility_auction(incoming)) {
     rules_.set_phase(MarketPhase::Auction);
     auction_end_ts_ = incoming.ts + rules_.config().vol_auction_duration_ns;
     return queue_in_auction(std::move(incoming));
   }
 
-  // FOK pre-check (atomic)
+  // FOK pre-check
   if (incoming.tif == TimeInForce::FOK) {
     const Qty avail = available_liquidity(incoming);
     if (avail < incoming.qty) {
@@ -322,7 +360,6 @@ void MatchingEngine::match_buy(MatchResult& out, Order& taker) {
       continue;
     }
 
-    // STP
     if (rules_.config().stp != StpMode::None) {
       const OwnerId maker_owner = lvl.q.front().owner;
       if (maker_owner == taker.owner) {
@@ -363,7 +400,6 @@ void MatchingEngine::match_sell(MatchResult& out, Order& taker) {
       continue;
     }
 
-    // STP
     if (rules_.config().stp != StpMode::None) {
       const OwnerId maker_owner = lvl.q.front().owner;
       if (maker_owner == taker.owner) {
