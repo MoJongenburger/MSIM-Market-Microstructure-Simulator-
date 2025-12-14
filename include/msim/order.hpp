@@ -1,12 +1,9 @@
 #pragma once
 #include <cstdint>
 
-#include "msim/types.hpp"
+#include "msim/types.hpp" // Side, OrderType, OrderId, Ts, Price, Qty, OwnerId
 
 namespace msim {
-
-enum class Side : uint8_t { Buy = 0, Sell = 1 };
-enum class OrderType : uint8_t { Limit = 0, Market = 1 };
 
 // Step 8: Time-in-force
 enum class TimeInForce : uint8_t { GTC = 0, IOC = 1, FOK = 2 };
