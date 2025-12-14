@@ -88,7 +88,7 @@ add_executable(msim_tests
   tests/test_rules.cpp
   tests/test_order_types.cpp
   tests/test_stp.cpp
-  tests/test_volatility.cpp
+  tests/test_auction_uncross.cpp
 )
 
 target_link_libraries(msim_tests PRIVATE msim GTest::gtest_main)
