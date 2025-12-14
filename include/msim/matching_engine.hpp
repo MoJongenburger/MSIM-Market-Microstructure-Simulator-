@@ -13,7 +13,7 @@ enum class OrderStatus : uint8_t { Accepted = 0, Rejected = 1 };
 
 struct MatchResult {
   std::vector<Trade> trades;
-  std::optional<Order> resting; // remainder becomes resting limit (if any)
+  std::optional<Order> resting;
   Qty filled_qty{0};
 
   OrderStatus status{OrderStatus::Accepted};
@@ -40,6 +40,9 @@ private:
 
   MatchResult process_market(Order incoming);
   MatchResult process_limit(Order incoming);
+
+  // Step 8 helpers (FOK needs a pre-check without mutating book)
+  Qty available_liquidity(const Order& taker) const noexcept;
 
   void match_buy(MatchResult& out, Order& taker);
   void match_sell(MatchResult& out, Order& taker);
