@@ -27,7 +27,13 @@ public:
 
   // O(1) cancel/modify
   bool cancel(OrderId id) noexcept;
-  bool modify_qty(OrderId id, Qty new_qty) noexcept;  // reduce-only
+
+  // reduce-only modify
+  bool modify_qty(OrderId id, Qty new_qty) noexcept;
+
+  // Backwards-compatible alias (used by older simulator code)
+  bool modify(OrderId id, Qty new_qty) noexcept { return modify_qty(id, new_qty); }
+
   void erase_locator(OrderId id) noexcept { loc_.erase(id); } // used by engine when it fully fills a maker
 
   // Top of book
