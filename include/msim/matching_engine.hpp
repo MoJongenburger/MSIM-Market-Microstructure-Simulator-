@@ -41,8 +41,11 @@ private:
   MatchResult process_market(Order incoming);
   MatchResult process_limit(Order incoming);
 
-  // Step 8 helpers (FOK needs a pre-check without mutating book)
   Qty available_liquidity(const Order& taker) const noexcept;
+
+  // Step 9: check front-of-queue maker owner for the next executable price level
+  std::optional<OwnerId> next_maker_owner_for(const Order& taker) const noexcept;
+  bool cancel_next_maker_if_self_trade(const Order& taker);
 
   void match_buy(MatchResult& out, Order& taker);
   void match_sell(MatchResult& out, Order& taker);
@@ -51,4 +54,3 @@ private:
 };
 
 } // namespace msim
-
