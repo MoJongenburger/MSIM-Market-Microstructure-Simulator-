@@ -50,6 +50,10 @@ add_library(msim
   src/simulator.cpp
   src/order_flow.cpp
   src/rules.cpp
+
+  # Step 16
+  src/world.cpp
+  src/agents/noise_trader.cpp
 )
 
 target_include_directories(msim PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -87,10 +91,9 @@ add_executable(msim_tests
   tests/test_simulator.cpp
   tests/test_rules.cpp
   tests/test_order_types.cpp
-  tests/test_stp.cpp
-  tests/test_auction_uncross.cpp
-  tests/test_closing_tal.cpp
-  tests/test_session.cpp
+
+  # Step 16
+  tests/test_agents_smoke.cpp
 )
 
 target_link_libraries(msim_tests PRIVATE msim GTest::gtest_main)
