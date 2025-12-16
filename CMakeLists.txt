@@ -51,9 +51,12 @@ add_library(msim
   src/order_flow.cpp
   src/rules.cpp
 
-  # Step 16
+  # Step 16 (World + agents)
   src/world.cpp
   src/agents/noise_trader.cpp
+
+  # Step 17 (Ledger + market maker agent)
+  src/agents/market_maker.cpp
 )
 
 target_include_directories(msim PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -75,6 +78,7 @@ enable_testing()
 
 include(FetchContent)
 
+# Recommended for MSVC CRT compatibility
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 
 FetchContent_Declare(
@@ -92,7 +96,7 @@ add_executable(msim_tests
   tests/test_rules.cpp
   tests/test_order_types.cpp
 
-  # Step 16
+  # Agents / world smoke test
   tests/test_agents_smoke.cpp
 )
 
