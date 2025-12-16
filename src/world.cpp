@@ -1,71 +1,108 @@
 #include "msim/world.hpp"
-
-#include "msim/invariants.hpp"
+#include <algorithm>
+#include <cmath>
 
 namespace msim {
 
-void World::add_agent(std::unique_ptr<msim::agents::Agent> a) {
-  agents_.push_back(std::move(a));
+uint64_t World::splitmix64(uint64_t& x) noexcept {
+  uint64_t z = (x += 0x9e3779b97f4a7c15ull);
+  z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+  z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+  return z ^ (z >> 31);
 }
 
-WorldResult World::run(Ts start_ts, Ts horizon_ns, Ts step_ns, std::size_t depth_levels, uint64_t seed) {
+WorldResult World::run(uint64_t seed, double horizon_seconds, WorldConfig cfg) {
   WorldResult out{};
-  if (step_ns <= 0) step_ns = 1;
 
-  // deterministic RNG per run
-  const uint64_t default_seed = static_cast<uint64_t>(start_ts) ^ 0x9E3779B97F4A7C15ULL;
-  std::mt19937_64 rng(seed == 0 ? default_seed : seed);
+  const Ts t0 = 0;
+  const Ts t_end = static_cast<Ts>(std::llround(horizon_seconds * 1'000'000'000.0));
 
-  const Ts end_ts = start_ts + horizon_ns;
+  // deterministic per-agent seeding
+  uint64_t sm = seed;
+  for (std::size_t i = 0; i < agents_.size(); ++i) {
+    const uint64_t s = splitmix64(sm) ^ (static_cast<uint64_t>(i) + 1ull);
+    agents_[i]->seed(s);
+  }
 
-  for (Ts ts = start_ts; ts <= end_ts; ts += step_ns) {
-    out.stats.steps++;
+  for (Ts ts = t0; ts <= t_end; ts += cfg.dt_ns) {
+    // flush timed phase transitions / auctions etc
+    {
+      auto flushed = engine_.flush(ts);
+      if (!flushed.empty()) {
+        out.trades.insert(out.trades.end(), flushed.begin(), flushed.end());
+        auto bb = engine_.book().best_bid();
+        auto ba = engine_.book().best_ask();
+        auto mid = midprice(bb, ba);
+        apply_trades_to_accounts(ts, flushed, order_meta_, accounts_, mid);
+      }
+    }
 
-    const auto view = msim::agents::make_view(engine_.book(), ts, depth_levels);
+    const auto bb = engine_.book().best_bid();
+    const auto ba = engine_.book().best_ask();
+    const auto mid = midprice(bb, ba);
 
-    // Agents generate actions at this timestamp (deterministic ordering by registration)
+    MarketView view{};
+    view.ts = ts;
+    view.best_bid = bb;
+    view.best_ask = ba;
+    view.mid = mid;
+    view.last_trade = engine_.rules().last_trade_price();
+
+    // per-agent actions in insertion order (deterministic)
     for (auto& ap : agents_) {
-      auto actions = ap->generate_actions(view, rng);
-      out.stats.actions_sent += static_cast<uint64_t>(actions.size());
+      const OwnerId oid = ap->owner();
 
-      for (auto& act : actions) {
-        if (act.type == msim::agents::ActionType::Place) {
-          out.stats.orders_sent++;
+      const auto it = accounts_.find(oid);
+      AgentState self{};
+      self.owner = oid;
+      if (it != accounts_.end()) {
+        self.cash_ticks = it->second.cash_ticks;
+        self.position = it->second.position;
+      }
 
-          act.place.ts = ts;
-          act.place.owner = ap->owner_id();
+      std::vector<Action> actions;
+      actions.reserve(8);
+      ap->step(ts, view, self, actions);
 
-          auto res = engine_.process(act.place);
-          if (res.status == msim::OrderStatus::Rejected) out.stats.rejects++;
+      for (const auto& act : actions) {
+        if (act.type == ActionType::Submit) {
+          Order o = act.order;
+          o.ts = ts;
 
-          out.stats.trades += static_cast<uint64_t>(res.trades.size());
-          out.trades.insert(out.trades.end(), res.trades.begin(), res.trades.end());
+          // record meta BEFORE processing (so taker side/owner is known)
+          order_meta_[o.id] = OrderMeta{o.owner, o.side};
 
-          // broadcast trades to agents
-          msim::agents::MarketEvent ev{};
-          ev.ts = ts;
-          ev.phase = engine_.rules().phase();
-          ev.trades = std::move(res.trades);
-          for (auto& bp : agents_) bp->on_market_event(ev);
-
-          // record top-of-book snapshot after each message (like an exchange feed)
-          msim::BookTop top{};
-          top.ts = ts;
-          top.best_bid = engine_.book().best_bid();
-          top.best_ask = engine_.book().best_ask();
-          top.mid = msim::midprice(top.best_bid, top.best_ask);
-          out.tops.push_back(top);
-        }
-        else if (act.type == msim::agents::ActionType::Cancel) {
-          out.stats.cancels_sent++;
-          (void)engine_.book_mut().cancel(act.cancel_id);
-        }
-        else if (act.type == msim::agents::ActionType::ModifyQty) {
-          out.stats.modifies_sent++;
-          (void)engine_.book_mut().modify_qty(act.cancel_id, act.new_qty);
+          auto res = engine_.process(o);
+          if (!res.trades.empty()) {
+            out.trades.insert(out.trades.end(), res.trades.begin(), res.trades.end());
+            const auto bb2 = engine_.book().best_bid();
+            const auto ba2 = engine_.book().best_ask();
+            const auto mid2 = midprice(bb2, ba2);
+            apply_trades_to_accounts(ts, res.trades, order_meta_, accounts_, mid2);
+          }
+        } else if (act.type == ActionType::Cancel) {
+          if (!engine_.book_mut().cancel(act.id)) out.cancel_failures++;
+        } else {
+          if (!engine_.book_mut().modify_qty(act.id, act.new_qty)) out.modify_failures++;
         }
       }
     }
+
+    // record top-of-book
+    BookTop top{};
+    top.ts = ts;
+    top.best_bid = engine_.book().best_bid();
+    top.best_ask = engine_.book().best_ask();
+    top.mid = midprice(top.best_bid, top.best_ask);
+    out.tops.push_back(top);
+  }
+
+  // final account snapshots at end
+  {
+    const auto bb = engine_.book().best_bid();
+    const auto ba = engine_.book().best_ask();
+    const auto mid = midprice(bb, ba);
+    out.accounts = make_account_snapshots(t_end, accounts_, mid);
   }
 
   return out;
