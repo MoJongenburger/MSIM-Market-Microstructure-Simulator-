@@ -1,47 +1,44 @@
 #include <gtest/gtest.h>
 
-#include <memory>
-
 #include "msim/world.hpp"
-#include "msim/matching_engine.hpp"
 #include "msim/rules.hpp"
 #include "msim/agents/noise_trader.hpp"
+#include "msim/agents/market_maker.hpp"
 
 TEST(Agents, NoiseTraderWorldRunsDeterministically) {
-  msim::RulesConfig cfg;
+  msim::RulesConfig cfg{};
+  cfg.tick_size_ticks = 1;
+  cfg.lot_size = 1;
+  cfg.min_qty = 1;
 
-  msim::agents::NoiseTraderConfig nt{};
-  nt.intensity_per_step = 0.30;
-  nt.prob_market = 0.15;
-  nt.max_offset_ticks = 5;
-  nt.min_qty = 1;
-  nt.max_qty = 10;
-  nt.tick_size = 1;
-  nt.lot_size = 1;
-  nt.default_mid = 100;
-
-  auto make_world = [&]() {
+  {
     msim::MatchingEngine eng{ msim::RuleSet(cfg) };
     msim::World w(std::move(eng));
+    msim::NoiseTraderParams np{};
+    msim::MarketMakerParams mp{};
 
-    w.add_agent(std::make_unique<msim::agents::NoiseTrader>(1, nt));
-    w.add_agent(std::make_unique<msim::agents::NoiseTrader>(2, nt));
-    w.add_agent(std::make_unique<msim::agents::NoiseTrader>(3, nt));
+    w.add_agent(std::make_unique<msim::NoiseTrader>(msim::OwnerId{1}, cfg, np));
+    w.add_agent(std::make_unique<msim::MarketMaker>(msim::OwnerId{2}, cfg, mp));
 
-    return w; // move
-  };
+    msim::WorldConfig wc{};
+    wc.dt_ns = 1'000'000;
 
-  const msim::Ts start_ts = 0;
-  const msim::Ts horizon_ns = 1'000'000'000; // 1s
-  const msim::Ts step_ns = 100'000;          // 0.1ms
-  const uint64_t seed = 123;
+    auto r1 = w.run(123, 1.0, wc);
 
-  auto w1 = make_world();
-  auto r1 = w1.run(start_ts, horizon_ns, step_ns, /*depth*/0, /*seed*/seed);
+    msim::MatchingEngine eng2{ msim::RuleSet(cfg) };
+    msim::World w2(std::move(eng2));
+    w2.add_agent(std::make_unique<msim::NoiseTrader>(msim::OwnerId{1}, cfg, np));
+    w2.add_agent(std::make_unique<msim::MarketMaker>(msim::OwnerId{2}, cfg, mp));
+    auto r2 = w2.run(123, 1.0, wc);
 
-  auto w2 = make_world();
-  auto r2 = w2.run(start_ts, horizon_ns, step_ns, /*depth*/0, /*seed*/seed);
+    EXPECT_EQ(r1.trades.size(), r2.trades.size());
+    ASSERT_EQ(r1.accounts.size(), r2.accounts.size());
 
-  EXPECT_EQ(r1.trades.size(), r2.trades.size());
-  EXPECT_EQ(r1.tops.size(), r2.tops.size());
+    for (std::size_t i = 0; i < r1.accounts.size(); ++i) {
+      EXPECT_EQ(r1.accounts[i].owner, r2.accounts[i].owner);
+      EXPECT_EQ(r1.accounts[i].cash_ticks, r2.accounts[i].cash_ticks);
+      EXPECT_EQ(r1.accounts[i].position, r2.accounts[i].position);
+      EXPECT_EQ(r1.accounts[i].mtm_ticks, r2.accounts[i].mtm_ticks);
+    }
+  }
 }
