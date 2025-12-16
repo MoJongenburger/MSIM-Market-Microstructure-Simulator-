@@ -22,8 +22,8 @@ TEST(Agents, NoiseTraderWorldRunsDeterministically) {
   w.add_agent(std::make_unique<msim::agents::NoiseTrader>(1, nt, cfg));
   w.add_agent(std::make_unique<msim::agents::NoiseTrader>(2, nt, cfg));
 
-  auto stats = w.run(/*start_ts*/0, /*horizon_ns*/1'000'000, /*step_ns*/10'000, /*depth*/0);
+  auto res = w.run(/*start_ts*/0, /*horizon_ns*/1'000'000, /*step_ns*/10'000, /*depth*/0, /*seed*/42);
 
-  EXPECT_GT(stats.steps, 0u);
-  EXPECT_GT(stats.actions_sent, 0u);
+  EXPECT_GT(res.stats.steps, 0u);
+  EXPECT_GT(res.stats.actions_sent, 0u);
 }
