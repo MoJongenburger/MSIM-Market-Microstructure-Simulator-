@@ -3,14 +3,16 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <utility>
 
 #include "msim/rules.hpp"
+#include "msim/matching_engine.hpp"
 #include "msim/world.hpp"
 
-// NoiseTrader is in msim::agents
+// NoiseTrader lives in msim::agents and takes NoiseTraderConfig
 #include "msim/agents/noise_trader.hpp"
 
-// MarketMaker + params are in msim (per your compiler notes)
+// MarketMaker + params live in msim (per your header)
 #include "msim/agents/market_maker.hpp"
 
 static void write_trades_csv(const std::string& path, const std::vector<msim::Trade>& trades) {
@@ -43,6 +45,7 @@ int main(int argc, char** argv) {
   if (argc >= 2) seed = static_cast<uint64_t>(std::stoull(argv[1]));
   if (argc >= 3) horizon = std::stod(argv[2]);
 
+  // Exchange / engine admission rules
   msim::RulesConfig rcfg{};
 
   // IMPORTANT: braces avoid "most vexing parse"
@@ -50,12 +53,18 @@ int main(int argc, char** argv) {
   msim::World w{std::move(eng)};
 
   // ---- Agents ----
-  // NoiseTrader has NO params struct in your project -> construct without it.
-  w.add_agent(std::make_unique<msim::agents::NoiseTrader>(msim::OwnerId{1}, rcfg));
 
-  // MarketMaker params + type are in msim (not msim::agents).
-  msim::MarketMakerParams mp{};
-  w.add_agent(std::make_unique<msim::MarketMaker>(msim::OwnerId{2}, rcfg, mp));
+  // NoiseTrader uses its own config type (NOT RulesConfig)
+  msim::agents::NoiseTraderConfig nt_cfg{};
+  // nt_cfg.tick_size = 1;  // defaults already 1
+  // nt_cfg.lot_size  = 1;  // defaults already 1
+  // nt_cfg.default_mid = 100; // default already 100
+
+  w.add_agent(std::make_unique<msim::agents::NoiseTrader>(msim::OwnerId{1}, nt_cfg));
+
+  // MarketMaker lives in msim and takes (OwnerId, RulesConfig, MarketMakerParams)
+  msim::MarketMakerParams mm_params{};
+  w.add_agent(std::make_unique<msim::MarketMaker>(msim::OwnerId{2}, rcfg, mm_params));
 
   auto res = w.run(seed, horizon);
 
