@@ -137,7 +137,3 @@ tests/                # gtests
 * Stop / stop-limit orders
 * Iceberg orders
 * Benchmarks + profiling + performance charts
-
-```
-::contentReference[oaicite:0]{index=0}
-```
