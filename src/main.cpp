@@ -7,10 +7,10 @@
 #include "msim/rules.hpp"
 #include "msim/world.hpp"
 
-// Noise trader lives under msim::agents, but params are in msim (per your CI error)
+// NoiseTrader is in msim::agents
 #include "msim/agents/noise_trader.hpp"
 
-// Market maker lives under msim (per your CI error)
+// MarketMaker + params are in msim (per your compiler notes)
 #include "msim/agents/market_maker.hpp"
 
 static void write_trades_csv(const std::string& path, const std::vector<msim::Trade>& trades) {
@@ -45,16 +45,15 @@ int main(int argc, char** argv) {
 
   msim::RulesConfig rcfg{};
 
-  // Avoid "most vexing parse"
+  // IMPORTANT: braces avoid "most vexing parse"
   msim::MatchingEngine eng{msim::RuleSet(rcfg)};
   msim::World w{std::move(eng)};
 
   // ---- Agents ----
-  // NoiseTrader: class is msim::agents::NoiseTrader, params are msim::NoiseTraderParams
-  msim::NoiseTraderParams np{};
-  w.add_agent(std::make_unique<msim::agents::NoiseTrader>(msim::OwnerId{1}, rcfg, np));
+  // NoiseTrader has NO params struct in your project -> construct without it.
+  w.add_agent(std::make_unique<msim::agents::NoiseTrader>(msim::OwnerId{1}, rcfg));
 
-  // MarketMaker: class + params are msim::MarketMaker / msim::MarketMakerParams
+  // MarketMaker params + type are in msim (not msim::agents).
   msim::MarketMakerParams mp{};
   w.add_agent(std::make_unique<msim::MarketMaker>(msim::OwnerId{2}, rcfg, mp));
 
