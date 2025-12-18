@@ -1,0 +1,161 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>MSIM Gateway UI</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 16px; }
+    .row { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; }
+    .card { border: 1px solid #ddd; border-radius: 10px; padding: 12px; }
+    #chart { height: 420px; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    td, th { border-bottom: 1px solid #eee; padding: 4px 6px; text-align: right; }
+    th { text-align: right; }
+    .two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    input, select, button { padding: 6px; }
+    .muted { color:#666; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h2>MSIM — Live Book + Trades</h2>
+  <div class="muted">Polling MVP (next step: WebSocket/SSE + candles/timeframes).</div>
+
+  <div class="row">
+    <div class="card">
+      <div id="chart"></div>
+    </div>
+
+    <div class="card">
+      <div><b>Top</b>: bid=<span id="bb">-</span> ask=<span id="ba">-</span> mid=<span id="mid">-</span></div>
+      <hr/>
+
+      <b>Order entry</b>
+      <div class="two" style="margin-top:8px;">
+        <select id="side">
+          <option value="buy">buy</option>
+          <option value="sell">sell</option>
+        </select>
+        <select id="type">
+          <option value="limit">limit</option>
+          <option value="market">market</option>
+        </select>
+
+        <input id="price" type="number" placeholder="price (limit)" />
+        <input id="qty" type="number" placeholder="qty" value="1" />
+
+        <select id="tif">
+          <option value="GTC">GTC</option>
+          <option value="IOC">IOC</option>
+          <option value="FOK">FOK</option>
+        </select>
+        <select id="mkt_style">
+          <option value="PURE">PURE</option>
+          <option value="MTL">MTL</option>
+        </select>
+      </div>
+      <button id="send" style="margin-top:8px; width:100%;">Send order</button>
+
+      <hr/>
+      <div class="two">
+        <div>
+          <b>Asks</b>
+          <table><thead><tr><th>px</th><th>qty</th></tr></thead><tbody id="asks"></tbody></table>
+        </div>
+        <div>
+          <b>Bids</b>
+          <table><thead><tr><th>px</th><th>qty</th></tr></thead><tbody id="bids"></tbody></table>
+        </div>
+      </div>
+
+      <hr/>
+      <b>Trades</b>
+      <table>
+        <thead><tr><th>id</th><th>ts</th><th>px</th><th>qty</th></tr></thead>
+        <tbody id="tape"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+  <script>
+    const chart = LightweightCharts.createChart(document.getElementById('chart'), { height: 420 });
+    const series = chart.addLineSeries();
+
+    let lastTradeId = 0;
+    let points = [];
+
+    async function getJSON(path) {
+      const r = await fetch(path);
+      return await r.json();
+    }
+
+    function setText(id, v) { document.getElementById(id).textContent = v ?? "-"; }
+
+    function renderDepth(id, levels) {
+      const tbody = document.getElementById(id);
+      tbody.innerHTML = "";
+      for (const lv of levels) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td>${lv.px}</td><td>${lv.qty}</td>`;
+        tbody.appendChild(tr);
+      }
+    }
+
+    function renderTrades(trades) {
+      const tbody = document.getElementById("tape");
+      for (const t of trades.slice(-25)) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td>${t.id}</td><td>${t.ts}</td><td>${t.price}</td><td>${t.qty}</td>`;
+        tbody.prepend(tr);
+      }
+      while (tbody.children.length > 50) tbody.removeChild(tbody.lastChild);
+    }
+
+    async function tick() {
+      const state = await getJSON(`/state?depth=10`);
+      setText("bb", state.best_bid);
+      setText("ba", state.best_ask);
+      setText("mid", state.mid);
+
+      renderDepth("asks", state.asks);
+      renderDepth("bids", state.bids);
+
+      const trades = await getJSON(`/trades?since=${lastTradeId}`);
+      if (trades.length) {
+        lastTradeId = trades[trades.length - 1].id;
+        renderTrades(trades);
+
+        // chart: append last price point
+        for (const t of trades) {
+          points.push({ time: t.ts / 1e9, value: t.price }); // seconds axis
+        }
+        // Keep chart bounded
+        if (points.length > 4000) points = points.slice(points.length - 4000);
+        series.setData(points);
+      }
+    }
+
+    document.getElementById("send").addEventListener("click", async () => {
+      const side = document.getElementById("side").value;
+      const type = document.getElementById("type").value;
+      const qty = parseInt(document.getElementById("qty").value || "1", 10);
+      const tif = document.getElementById("tif").value;
+      const mkt_style = document.getElementById("mkt_style").value;
+
+      const payload = { side, type, qty, tif, mkt_style };
+      if (type === "limit") payload.price = parseInt(document.getElementById("price").value || "0", 10);
+
+      const r = await fetch("/order", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const j = await r.json();
+      console.log("order response", j);
+    });
+
+    setInterval(tick, 200);
+    tick();
+  </script>
+</body>
+</html>
