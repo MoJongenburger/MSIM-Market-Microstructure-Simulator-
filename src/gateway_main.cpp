@@ -25,7 +25,7 @@ static long long get_ll(const httplib::Request& req, const char* key, long long 
 
 static std::string json_bool(bool v) { return v ? "true" : "false"; }
 
-// Compile-time member detection (C++20 requires-expressions)
+// ---------------- Compile-time detection helpers ----------------
 template <class T>
 static bool ack_accepted_(const T& a) {
   if constexpr (requires { a.accepted; }) {
@@ -33,11 +33,9 @@ static bool ack_accepted_(const T& a) {
   } else if constexpr (requires { a.ok; }) {
     return static_cast<bool>(a.ok);
   } else if constexpr (requires { a.status; }) {
-    // If it uses msim::OrderStatus or similar, treat 0/Accepted as true when possible.
-    // We don’t assume exact enum values, but most use Accepted=0.
+    // Most codebases: Accepted==0
     return static_cast<int>(a.status) == 0;
   } else {
-    // fallback: assume accepted if no field exists
     return true;
   }
 }
@@ -94,10 +92,33 @@ static bool live_modify_(LiveW& w, msim::OrderId id, msim::Qty q) {
   }
 }
 
+// Depth level accessors (supports several layouts)
+template <class L>
+static long long level_price_(const L& x) {
+  if constexpr (requires { x.price; }) return static_cast<long long>(x.price);
+  else if constexpr (requires { x.px; }) return static_cast<long long>(x.px);
+  else return 0;
+}
+
+template <class L>
+static long long level_qty_(const L& x) {
+  if constexpr (requires { x.qty; }) return static_cast<long long>(x.qty);
+  else if constexpr (requires { x.total_qty; }) return static_cast<long long>(x.total_qty);
+  else if constexpr (requires { x.size; }) return static_cast<long long>(x.size);
+  else return 0;
+}
+
+template <class L>
+static long long level_orders_(const L& x) {
+  if constexpr (requires { x.order_count; }) return static_cast<long long>(x.order_count);
+  else if constexpr (requires { x.orders; }) return static_cast<long long>(x.orders);
+  else return 0;
+}
+
 // ---------------- HTML (split to avoid MSVC C2026) ----------------
 static std::string html_page() {
   std::string s;
-  s.reserve(60'000);
+  s.reserve(90'000);
 
   s += R"HTML(
 <!doctype html>
@@ -107,23 +128,100 @@ static std::string html_page() {
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>MSIM Live Exchange</title>
   <style>
-    body { margin:0; padding:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; background:#0b0f14; color:#e5e7eb; }
-    .wrap { padding: 14px; display: grid; grid-template-columns: 360px 1fr; gap: 14px; }
-    .card { background:#0f172a; border:1px solid #1f2a37; border-radius:12px; padding:14px; box-shadow: 0 8px 24px rgba(0,0,0,.25); }
-    h2 { margin: 0 0 10px 0; font-size: 14px; letter-spacing: .02em; color: #cbd5e1; }
-    .row { display:flex; gap:8px; align-items:center; margin: 6px 0; }
-    label { width: 90px; font-size: 12px; color:#94a3b8; }
-    input, select, button { background:#0b1220; color:#e5e7eb; border:1px solid #1f2a37; border-radius:8px; padding:6px 8px; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-    button { cursor:pointer; }
-    button:hover { filter: brightness(1.1); }
+    :root{
+      --bg:#0b0f14;
+      --panel:#0f172a;
+      --panel2:#0b1220;
+      --border:#1f2a37;
+      --text:#e5e7eb;
+      --muted:#94a3b8;
+      --muted2:#cbd5e1;
+      --up:#22c55e;
+      --down:#ef4444;
+      --wick:#94a3b8;
+      --grid:#1f2a37;
+    }
+    body { margin:0; padding:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; background:var(--bg); color:var(--text); }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
-    .topline { padding: 10px 14px; border-bottom: 1px solid #1f2a37; background:#0b0f14; position: sticky; top: 0; z-index: 5; }
-    canvas { width: 100%; height: 260px; background:#0b0f14; border:1px solid #1f2a37; border-radius:10px; }
+    .topline { padding: 10px 14px; border-bottom: 1px solid var(--border); background:var(--bg); position: sticky; top: 0; z-index: 5; }
+
+    .wrap { padding: 14px; display: grid; grid-template-columns: 360px 1fr; gap: 14px; }
+
+    .card {
+      background:var(--panel);
+      border:1px solid var(--border);
+      border-radius:12px;
+      padding:14px;
+      box-shadow: 0 8px 24px rgba(0,0,0,.25);
+    }
+
+    h2 { margin: 0 0 10px 0; font-size: 13px; letter-spacing: .02em; color: var(--muted2); text-transform: uppercase; }
+    .row { display:flex; gap:8px; align-items:center; margin: 6px 0; }
+    label { width: 90px; font-size: 12px; color:var(--muted); }
+
+    input, select, button {
+      background:var(--panel2);
+      color:var(--text);
+      border:1px solid var(--border);
+      border-radius:8px;
+      padding:6px 8px;
+      font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      outline: none;
+    }
+    input:focus, select:focus { border-color:#334155; }
+    button { cursor:pointer; }
+    button:hover { filter: brightness(1.12); }
+
+    .rightCol { display:grid; grid-template-rows: auto auto auto; gap: 14px; }
+    canvas { width: 100%; height: 260px; background:var(--bg); border:1px solid var(--border); border-radius:10px; }
+
     table { width:100%; border-collapse:collapse; font-size:12px; }
-    th, td { padding:6px 8px; border-bottom:1px solid #1f2a37; text-align: left; }
-    th { color:#94a3b8; font-weight: 600; }
-    .controls { display:flex; gap:10px; align-items:center; margin: 8px 0 10px 0; color:#94a3b8; font-size: 12px; flex-wrap: wrap; }
-    .rightCol { display:grid; grid-template-rows: auto auto 1fr; gap: 14px; }
+    th, td { padding:6px 8px; border-bottom:1px solid var(--border); text-align: left; }
+    th { color:var(--muted); font-weight: 600; }
+
+    .controls { display:flex; gap:10px; align-items:center; margin: 8px 0 10px 0; color:var(--muted); font-size: 12px; flex-wrap: wrap; }
+
+    /* Ladder styling */
+    .ladder {
+      width:100%;
+      border:1px solid var(--border);
+      border-radius:10px;
+      overflow:hidden;
+      background:var(--bg);
+    }
+    .ladderHead, .ladderRow {
+      display:grid;
+      grid-template-columns: 1fr 90px 90px 1fr; /* bidQty, bidPx, askPx, askQty */
+      gap: 0;
+      align-items: center;
+    }
+    .ladderHead {
+      background: #0a0e13;
+      border-bottom: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 11px;
+      padding: 6px 8px;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+    .ladderRow {
+      padding: 4px 8px;
+      border-bottom: 1px solid rgba(31,42,55,0.7);
+      font-size: 12px;
+    }
+    .ladderRow:last-child { border-bottom: none; }
+    .cell { position: relative; height: 18px; display:flex; align-items:center; }
+    .cell.right { justify-content: flex-end; }
+    .bar {
+      position:absolute; top:2px; bottom:2px; border-radius:6px;
+      opacity: 0.22;
+    }
+    .bar.bid { right:0; background: var(--up); }
+    .bar.ask { left:0; background: var(--down); }
+    .pxBid { color: #86efac; } /* green-ish */
+    .pxAsk { color: #fca5a5; } /* red-ish */
+    .muted { color: var(--muted); }
+
   </style>
 </head>
 <body>
@@ -173,8 +271,8 @@ static std::string html_page() {
         <button id="modifyBtn">Modify</button>
       </div>
 
-      <div style="margin-top:10px; color:#94a3b8; font-size:12px;">
-        Chart is <b>OHLC from trades</b> aggregated client-side (TradingView vibe).
+      <div style="margin-top:10px; color:var(--muted); font-size:12px;">
+        Chart is <b>OHLC</b> aggregated client-side from trades.
       </div>
     </div>
 
@@ -203,9 +301,30 @@ static std::string html_page() {
             <option value="300">5m</option>
             <option value="900">15m</option>
           </select>
+
+          <span style="margin-left:10px;">Depth:</span>
+          <select id="depthSel">
+            <option value="5" selected>5</option>
+            <option value="10">10</option>
+            <option value="20">20</option>
+          </select>
         </div>
 
         <canvas id="chart"></canvas>
+      </div>
+
+      <div class="card">
+        <h2>Order Book (L2 Ladder)</h2>
+        <div class="ladder">
+          <div class="ladderHead">
+            <div class="cell">Bid Qty</div>
+            <div class="cell right">Bid Px</div>
+            <div class="cell">Ask Px</div>
+            <div class="cell right">Ask Qty</div>
+          </div>
+          <div id="ladderBody"></div>
+        </div>
+        <div style="margin-top:8px;" class="mono muted" id="ladderMeta">levels=5</div>
       </div>
 
       <div class="card">
@@ -240,7 +359,7 @@ async function apiPostForm(url, params){
 }
 
 // ---------------- Tape (client-side trade history) ----------------
-const state = { tape: [], lastTradeId: 0 };
+const state = { tape: [], lastTradeId: 0, lastDepthTs: 0 };
 
 function updateTape(recent){
   if(!Array.isArray(recent)) return;
@@ -285,8 +404,7 @@ function buildCandles(trades, nowNs, windowNs, intervalNs){
 
   xs.sort((a,b)=>a.ts-b.ts);
 
-  const buckets = new Map(); // key: bucketStartNs
-
+  const buckets = new Map();
   for(const t of xs){
     const k = Math.floor(t.ts / intervalNs) * intervalNs;
     let c = buckets.get(k);
@@ -304,7 +422,7 @@ function buildCandles(trades, nowNs, windowNs, intervalNs){
   const keys = Array.from(buckets.keys()).sort((a,b)=>a-b);
   const out = keys.map(k => buckets.get(k));
 
-  // Fill gaps with previous close
+  // fill gaps with previous close
   const filled = [];
   let prev = out[0];
   filled.push(prev);
@@ -323,12 +441,11 @@ function buildCandles(trades, nowNs, windowNs, intervalNs){
 }
 
 // ---------------- Chart rendering ----------------
-function drawGrid(ctx, w, h, padL, padR, padT, padB, bg, grid){
+function drawGrid(ctx, w, h, padL, padR, padT, padB){
   ctx.save();
-  ctx.fillStyle = bg;
-  ctx.strokeStyle = grid;
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
+  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--grid').trim();
   ctx.lineWidth = 1;
-
   ctx.fillRect(0,0,w,h);
 
   const gx = 6, gy = 5;
@@ -350,16 +467,14 @@ function drawCandles(candles){
   const w = canvas.width = canvas.clientWidth;
   const h = canvas.height = canvas.clientHeight;
 
-  const bg = "#0b0f14";
-  const grid = "#1f2a37";
-  const text = "#cbd5e1";
-  const up = "#22c55e";
-  const down = "#ef4444";
-  const wick = "#94a3b8";
+  const css = getComputedStyle(document.documentElement);
+  const text = css.getPropertyValue('--muted2').trim();
+  const up = css.getPropertyValue('--up').trim();
+  const down = css.getPropertyValue('--down').trim();
+  const wick = css.getPropertyValue('--wick').trim();
 
   const padL = 52, padR = 10, padT = 10, padB = 22;
-
-  drawGrid(ctx, w, h, padL, padR, padT, padB, bg, grid);
+  drawGrid(ctx, w, h, padL, padR, padT, padB);
 
   ctx.font = "11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
   ctx.fillStyle = text;
@@ -370,20 +485,14 @@ function drawCandles(candles){
   }
 
   let lo = Infinity, hi = -Infinity;
-  for(const c of candles){
-    lo = Math.min(lo, c.l);
-    hi = Math.max(hi, c.h);
-  }
-  if(!isFinite(lo) || !isFinite(hi) || hi <= lo){
-    lo = lo - 1; hi = hi + 1;
-  }
+  for(const c of candles){ lo = Math.min(lo, c.l); hi = Math.max(hi, c.h); }
+  if(!isFinite(lo) || !isFinite(hi) || hi <= lo){ lo -= 1; hi += 1; }
   const pad = (hi-lo)*0.06;
   lo -= pad; hi += pad;
 
   const px = (i)=> padL + (w-padL-padR) * (i / Math.max(1, candles.length-1));
   const py = (p)=> padT + (h-padT-padB) * (1 - (p - lo) / (hi - lo));
 
-  // y-axis labels
   for(let j=0;j<=5;j++){
     const p = lo + (hi-lo)*j/5;
     const y = py(p);
@@ -399,12 +508,8 @@ function drawCandles(candles){
     const x = px(i);
     const yO = py(c.o), yC = py(c.c), yH = py(c.h), yL = py(c.l);
 
-    // wick
     ctx.strokeStyle = wick;
-    ctx.beginPath();
-    ctx.moveTo(x, yH);
-    ctx.lineTo(x, yL);
-    ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x, yH); ctx.lineTo(x, yL); ctx.stroke();
 
     const isUp = c.c >= c.o;
     ctx.fillStyle = isUp ? up : down;
@@ -415,7 +520,6 @@ function drawCandles(candles){
     ctx.fillRect(Math.floor(x - bodyW/2), Math.floor(top), bodyW, Math.floor(height));
   }
 
-  // x-axis labels: show simulation seconds
   const labelCount = 5;
   for(let i=0;i<=labelCount;i++){
     const idx = Math.floor((candles.length-1) * i/labelCount);
@@ -440,7 +544,7 @@ function setTradesTable(trades){
   tbody.innerHTML = "";
   if(!Array.isArray(trades)) return;
 
-  const xs = trades.slice().reverse().slice(0, 30);
+  const xs = trades.slice().reverse().slice(0, 22); // slightly calmer
   for(const t of xs){
     const tr = document.createElement("tr");
     tr.innerHTML = `
@@ -454,15 +558,63 @@ function setTradesTable(trades){
   }
 }
 
+function renderLadder(depth){
+  const body = $("ladderBody");
+  body.innerHTML = "";
+
+  const bids = Array.isArray(depth.bids) ? depth.bids : [];
+  const asks = Array.isArray(depth.asks) ? depth.asks : [];
+
+  const n = Math.max(bids.length, asks.length);
+  if(n === 0){
+    body.innerHTML = `<div style="padding:10px;" class="mono muted">no depth yet</div>`;
+    return;
+  }
+
+  let maxQty = 1;
+  for(const b of bids) maxQty = Math.max(maxQty, Number(b.qty||0));
+  for(const a of asks) maxQty = Math.max(maxQty, Number(a.qty||0));
+
+  for(let i=0;i<n;i++){
+    const b = bids[i];
+    const a = asks[i];
+
+    const bidPx = (b && b.price!=null) ? b.price : "";
+    const bidQty = (b && b.qty!=null) ? b.qty : "";
+    const askPx = (a && a.price!=null) ? a.price : "";
+    const askQty = (a && a.qty!=null) ? a.qty : "";
+
+    const bidW = (b && b.qty!=null) ? Math.max(0, Math.min(1, Number(b.qty)/maxQty)) : 0;
+    const askW = (a && a.qty!=null) ? Math.max(0, Math.min(1, Number(a.qty)/maxQty)) : 0;
+
+    const row = document.createElement("div");
+    row.className = "ladderRow";
+
+    row.innerHTML = `
+      <div class="cell right mono">
+        <div class="bar bid" style="width:${Math.floor(bidW*100)}%;"></div>
+        ${bidQty}
+      </div>
+      <div class="cell right mono pxBid">${bidPx}</div>
+      <div class="cell mono pxAsk">${askPx}</div>
+      <div class="cell mono">
+        <div class="bar ask" style="width:${Math.floor(askW*100)}%;"></div>
+        <span style="margin-left:auto;">${askQty}</span>
+      </div>
+    `;
+    body.appendChild(row);
+  }
+}
+
 // ---------------- Main refresh loop ----------------
 async function refresh(){
   try{
     const snap = await apiGet("/api/snapshot");
-
     setTopLine(snap);
     setTradesTable(snap.recent_trades);
     updateTape(snap.recent_trades);
 
+    // candles
     const winS = Number($("windowSel").value || 60);
     const winNs = Math.floor(winS * 1e9);
 
@@ -472,6 +624,12 @@ async function refresh(){
 
     const candles = buildCandles(state.tape, Number(snap.ts), winNs, intervalNs);
     drawCandles(candles);
+
+    // depth (L2 ladder)
+    const levels = Number($("depthSel").value || 5);
+    const depth = await apiGet("/api/depth?levels=" + encodeURIComponent(levels));
+    renderLadder(depth);
+    $("ladderMeta").textContent = `levels=${levels}  max_qty=${depth.max_qty ?? "-"}`;
 
   }catch(e){
     $("topline").textContent = "error: " + e;
@@ -518,9 +676,10 @@ $("modifyBtn").addEventListener("click", async ()=>{
 
 $("windowSel").addEventListener("change", ()=>{ refresh(); });
 $("candleSel").addEventListener("change", ()=>{ refresh(); });
+$("depthSel").addEventListener("change", ()=>{ refresh(); });
 
 refresh();
-setInterval(refresh, 250);
+setInterval(refresh, 350);
 </script>
 </body>
 </html>
@@ -537,15 +696,13 @@ int main(int argc, char** argv) {
   if (argc > 1) port = std::atoi(argv[1]);
   if (argc > 2) seed = static_cast<uint64_t>(std::strtoull(argv[2], nullptr, 10));
 
-  // Make a long horizon so it effectively runs "forever" for the gateway session.
-  // (Still safely within int64 nanoseconds.)
+  // Make a long horizon so it runs "forever" for the gateway session.
   const double horizon_seconds = 3600.0 * 24.0 * 365.0; // ~1 year sim time
 
   msim::RulesConfig rcfg{};
   msim::MatchingEngine eng{msim::RuleSet(rcfg)};
   msim::LiveWorld world{std::move(eng)};
 
-  // Start background simulation
   world.start(seed, horizon_seconds);
 
   httplib::Server svr;
@@ -555,7 +712,6 @@ int main(int argc, char** argv) {
   });
 
   svr.Get("/api/snapshot", [&](const httplib::Request&, httplib::Response& res) {
-    // keep recent trades bounded (also used by chart tape)
     constexpr std::size_t MAX_TRADES = 250;
     auto snap = world.snapshot(MAX_TRADES);
 
@@ -586,6 +742,55 @@ int main(int argc, char** argv) {
     res.set_content(oss.str(), "application/json");
   });
 
+  // New: Depth endpoint for L2 ladder
+  svr.Get("/api/depth", [&](const httplib::Request& req, httplib::Response& res) {
+    std::size_t levels = 5;
+    if (req.has_param("levels")) {
+      try {
+        const auto v = std::stoull(req.get_param_value("levels"));
+        if (v > 0 && v <= 200) levels = static_cast<std::size_t>(v);
+      } catch (...) { /* ignore */ }
+    }
+
+    // LiveWorld API
+    auto d = world.book_depth(levels);
+
+    // We assume d.bids / d.asks are vectors of some DepthLevel type
+    // Serialize as {bids:[{price,qty,orders}], asks:[...], max_qty:...}
+    long long max_qty = 1;
+    for (const auto& x : d.bids) max_qty = std::max(max_qty, level_qty_(x));
+    for (const auto& x : d.asks) max_qty = std::max(max_qty, level_qty_(x));
+
+    std::ostringstream oss;
+    oss << "{";
+    oss << "\"max_qty\":" << max_qty << ",";
+    oss << "\"bids\":[";
+    for (std::size_t i = 0; i < d.bids.size(); ++i) {
+      const auto& x = d.bids[i];
+      if (i) oss << ",";
+      oss << "{"
+          << "\"price\":" << level_price_(x) << ","
+          << "\"qty\":" << level_qty_(x) << ","
+          << "\"orders\":" << level_orders_(x)
+          << "}";
+    }
+    oss << "],";
+    oss << "\"asks\":[";
+    for (std::size_t i = 0; i < d.asks.size(); ++i) {
+      const auto& x = d.asks[i];
+      if (i) oss << ",";
+      oss << "{"
+          << "\"price\":" << level_price_(x) << ","
+          << "\"qty\":" << level_qty_(x) << ","
+          << "\"orders\":" << level_orders_(x)
+          << "}";
+    }
+    oss << "]";
+    oss << "}";
+
+    res.set_content(oss.str(), "application/json");
+  });
+
   svr.Post("/api/order", [&](const httplib::Request& req, httplib::Response& res) {
     const auto side_s = req.has_param("side") ? req.get_param_value("side") : "Buy";
     const auto type_s = req.has_param("type") ? req.get_param_value("type") : "Limit";
@@ -597,7 +802,6 @@ int main(int argc, char** argv) {
 
     msim::Order o{};
     o.owner = static_cast<msim::OwnerId>(999);
-
     if (id_ll > 0) o.id = static_cast<msim::OrderId>(id_ll);
 
     o.side = (side_s == "Sell") ? msim::Side::Sell : msim::Side::Buy;
@@ -642,10 +846,8 @@ int main(int argc, char** argv) {
   std::cout << "MSIM gateway listening on http://localhost:" << port << "/\n";
   svr.listen("0.0.0.0", port);
 
-  // If LiveWorld has a stop() in your codebase, it will compile-time-detect and call it.
   if constexpr (requires { world.stop(); }) {
     world.stop();
   }
-
   return 0;
 }
