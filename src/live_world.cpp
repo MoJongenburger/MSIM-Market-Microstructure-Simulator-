@@ -66,7 +66,7 @@ LiveSnapshot LiveWorld::snapshot(std::size_t max_trades) const {
   const std::size_t n = std::min<std::size_t>(max_trades, cache_.trades.size());
   s.recent_trades.reserve(n);
 
-  // return most-recent-first or oldest-first? gateway handles; keep newest-first is convenient
+  // newest-first
   for (std::size_t i = 0; i < n; ++i) {
     const auto& t = cache_.trades[cache_.trades.size() - 1 - i];
     s.recent_trades.push_back(t);
@@ -83,7 +83,6 @@ std::vector<LiveMidPoint> LiveWorld::mid_series(Ts window_ns) const {
   const Ts t1 = cache_.tops.back().ts;
   const Ts t0 = (t1 > window_ns) ? (t1 - window_ns) : 0;
 
-  // collect all points in [t0, t1]
   for (const auto& x : cache_.tops) {
     if (x.ts < t0) continue;
     LiveMidPoint p{};
@@ -101,13 +100,17 @@ LiveBookDepth LiveWorld::book_depth(std::size_t levels) const {
   const std::size_t nb = std::min<std::size_t>(levels, cache_.depth.bids.size());
   const std::size_t na = std::min<std::size_t>(levels, cache_.depth.asks.size());
 
-  out.bids.assign(cache_.depth.bids.begin(), cache_.depth.bids.begin() + nb);
-  out.asks.assign(cache_.depth.asks.begin(), cache_.depth.asks.begin() + na);
+  // Avoid iterator arithmetic with size_t (fixes -Wsign-conversion under -Werror)
+  out.bids.reserve(nb);
+  for (std::size_t i = 0; i < nb; ++i) out.bids.push_back(cache_.depth.bids[i]);
+
+  out.asks.reserve(na);
+  for (std::size_t i = 0; i < na; ++i) out.asks.push_back(cache_.depth.asks[i]);
+
   return out;
 }
 
 OrderAck LiveWorld::submit_order(Order o) {
-  // assign owner+id if caller didn't
   if (o.owner == 0) o.owner = OwnerId{999};
 
   if (o.id == 0) {
@@ -115,29 +118,15 @@ OrderAck LiveWorld::submit_order(Order o) {
     o.id = next_order_id_(o.owner, seq);
   }
 
-  // use latest engine time
   o.ts = cur_ts_.load();
 
   std::lock_guard<std::mutex> lk(engine_mtx_);
-
   auto res = engine_.process(o);
 
   OrderAck ack{};
   ack.id = o.id;
-
-  // MatchResult in your project does NOT have .ack — extract what exists
-  if constexpr (requires { res.status; }) {
-    ack.status = res.status;
-  } else {
-    // fallback: if process() doesn't expose status, treat "no reject_reason" as accepted
-    ack.status = OrderStatus::Accepted;
-  }
-
-  if constexpr (requires { res.reject_reason; }) {
-    ack.reject_reason = res.reject_reason;
-  } else {
-    ack.reject_reason = RejectReason::None;
-  }
+  ack.status = res.status;
+  ack.reject_reason = res.reject_reason;
 
   update_cache_with_engine_locked_(o.ts, res.trades);
   return ack;
@@ -166,13 +155,11 @@ void LiveWorld::update_cache_with_engine_locked_(Ts ts, const std::vector<Trade>
   cache_.mid = compute_mid_(cache_.best_bid, cache_.best_ask);
   cache_.last_trade = engine_.rules().last_trade_price();
 
-  // trades (bounded)
   for (const auto& t : new_trades) {
     cache_.trades.push_back(t);
     if (cache_.trades.size() > max_cache_trades_) cache_.trades.pop_front();
   }
 
-  // top series (bounded)
   BookTop top{};
   top.ts = ts;
   top.best_bid = cache_.best_bid;
@@ -181,7 +168,6 @@ void LiveWorld::update_cache_with_engine_locked_(Ts ts, const std::vector<Trade>
   cache_.tops.push_back(top);
   if (cache_.tops.size() > max_cache_tops_) cache_.tops.pop_front();
 
-  // depth cache (top-N)
   LiveBookDepth bd{};
   bd.bids = extract_depth_(engine_.book(), Side::Buy, depth_cache_levels_);
   bd.asks = extract_depth_(engine_.book(), Side::Sell, depth_cache_levels_);
@@ -199,11 +185,9 @@ void LiveWorld::worker_() {
 
     std::lock_guard<std::mutex> lk(engine_mtx_);
 
-    // flush timed transitions (auctions/halts/etc)
     auto flushed = engine_.flush(ts);
     if (!flushed.empty()) update_cache_with_engine_locked_(ts, flushed);
 
-    // build view for agents from current book
     const auto bb = engine_.book().best_bid();
     const auto ba = engine_.book().best_ask();
     const auto mid = compute_mid_(bb, ba);
@@ -215,10 +199,10 @@ void LiveWorld::worker_() {
     view.mid = mid;
     view.last_trade = engine_.rules().last_trade_price();
 
-    // deterministic agent stepping order
     for (auto& ap : agents_) {
       AgentState self{};
       self.owner = ap->owner();
+
       std::vector<Action> actions;
       actions.reserve(8);
 
@@ -240,7 +224,7 @@ void LiveWorld::worker_() {
       }
     }
 
-    // record top even if no trades (keeps chart smooth)
+    // keep chart fed even on "quiet" steps
     update_cache_with_engine_locked_(ts, {});
   }
 
