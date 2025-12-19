@@ -83,8 +83,15 @@ private:
   // ---- depth extraction helpers (robust to LevelSummary layout) ----
   template <class X>
   static LiveBookDepth::DepthLevel to_level_(const X& x) {
+    // Your OrderBook::LevelSummary: { price, total_qty, order_count }
+    if constexpr (requires { x.price; x.total_qty; }) {
+      return LiveBookDepth::DepthLevel{
+          static_cast<Price>(x.price),
+          static_cast<Qty>(x.total_qty)
+      };
+    }
     // Struct with .price and .qty
-    if constexpr (requires { x.price; x.qty; }) {
+    else if constexpr (requires { x.price; x.qty; }) {
       return LiveBookDepth::DepthLevel{static_cast<Price>(x.price), static_cast<Qty>(x.qty)};
     }
     // Struct with .px and .qty
@@ -109,7 +116,7 @@ private:
 
   template <class Book>
   static auto depth_levels_(const Book& book, Side side, std::size_t levels) {
-    // Try common API names
+    // Your OrderBook has: depth(Side, size_t)
     if constexpr (requires { book.depth(side, levels); }) {
       return book.depth(side, levels);
     } else if constexpr (requires { book.depth_levels(side, levels); }) {
@@ -135,7 +142,6 @@ private:
   void update_cache_with_engine_locked_(Ts ts, const std::vector<Trade>& new_trades);
 
   static OrderId next_order_id_(OwnerId owner, uint32_t seq) noexcept {
-    // same scheme as MarketMaker to avoid collisions
     const uint64_t hi = (static_cast<uint64_t>(owner) & 0xFFFF'FFFFull) << 32;
     const uint64_t lo = static_cast<uint64_t>(seq);
     return static_cast<OrderId>(hi | lo);
