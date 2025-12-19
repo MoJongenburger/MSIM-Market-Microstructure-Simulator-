@@ -1,254 +1,250 @@
 #include "msim/live_world.hpp"
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
-#include <thread>
 
 namespace msim {
 
-static constexpr std::size_t kMaxTrades = 300;
-static constexpr std::size_t kMaxTops   = 2000;
-
-uint64_t LiveWorld::splitmix64(uint64_t& x) noexcept {
-  uint64_t z = (x += 0x9e3779b97f4a7c15ull);
-  z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
-  z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
-  return z ^ (z >> 31);
-}
-
-LiveWorld::LiveWorld(MatchingEngine engine, WorldConfig cfg, uint64_t seed, double horizon_seconds)
-  : cfg_(cfg), seed_(seed), engine_(std::move(engine)) {
-  t_end_ = static_cast<Ts>(std::llround(horizon_seconds * 1'000'000'000.0));
-
-  // Default agents for “live tape”
-  // NoiseTrader (msim::agents) + MarketMaker (msim)
-  {
-    msim::agents::NoiseTraderConfig nt{};
-    agents_.push_back(std::make_unique<msim::agents::NoiseTrader>(OwnerId{1}, nt));
-  }
-  {
-    RulesConfig rcfg{}; // default matches the engine defaults in your gateway
-    MarketMakerParams mp{};
-    agents_.push_back(std::make_unique<msim::MarketMaker>(OwnerId{2}, rcfg, mp));
-  }
-
-  // Seed agents deterministically
-  uint64_t sm = seed_;
-  for (std::size_t i = 0; i < agents_.size(); ++i) {
-    const uint64_t s = splitmix64(sm) ^ (static_cast<uint64_t>(i) + 1ull);
-    agents_[i]->seed(s);
-  }
-
-  // seed initial top point
-  BookTop top{};
-  top.ts = 0;
-  top.best_bid = engine_.book().best_bid();
-  top.best_ask = engine_.book().best_ask();
-  top.mid = midprice(top.best_bid, top.best_ask);
-  tops_.push_back(top);
-}
+LiveWorld::LiveWorld(MatchingEngine engine)
+  : engine_(std::move(engine)) {}
 
 LiveWorld::~LiveWorld() {
   stop();
 }
 
-void LiveWorld::start() {
-  bool expected = false;
-  if (!running_.compare_exchange_strong(expected, true)) return;
-  worker_ = std::thread([this]() { loop_(); });
+void LiveWorld::add_agent(std::unique_ptr<IAgent> a) {
+  agents_.push_back(std::move(a));
+}
+
+void LiveWorld::start(uint64_t seed, double horizon_seconds, WorldConfig cfg) {
+  if (running_.load()) return;
+
+  seed_ = seed;
+  horizon_s_ = horizon_seconds;
+  cfg_ = cfg;
+
+  stop_.store(false);
+  running_.store(true);
+
+  // deterministic per-agent seeding (like World)
+  {
+    std::lock_guard<std::mutex> lk(engine_mtx_);
+    uint64_t sm = seed_;
+    auto splitmix64 = [](uint64_t& x) noexcept {
+      uint64_t z = (x += 0x9e3779b97f4a7c15ull);
+      z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+      z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+      return z ^ (z >> 31);
+    };
+
+    for (std::size_t i = 0; i < agents_.size(); ++i) {
+      const uint64_t s = splitmix64(sm) ^ (static_cast<uint64_t>(i) + 1ull);
+      agents_[i]->seed(s);
+    }
+  }
+
+  worker_thread_ = std::thread([this]() { worker_(); });
 }
 
 void LiveWorld::stop() {
+  if (!running_.load()) return;
+  stop_.store(true);
+  if (worker_thread_.joinable()) worker_thread_.join();
   running_.store(false);
-  if (worker_.joinable()) worker_.join();
 }
 
-LiveWorld::Snapshot LiveWorld::snapshot() const {
-  std::lock_guard<std::mutex> lk(mu_);
-  Snapshot s{};
-  s.ts = ts_;
-  s.best_bid = engine_.book().best_bid();
-  s.best_ask = engine_.book().best_ask();
-  s.mid = midprice(s.best_bid, s.best_ask);
-  s.last_trade = engine_.rules().last_trade_price();
+LiveSnapshot LiveWorld::snapshot(std::size_t max_trades) const {
+  std::lock_guard<std::mutex> lk(cache_mtx_);
+
+  LiveSnapshot s{};
+  s.ts = cache_.ts;
+  s.best_bid = cache_.best_bid;
+  s.best_ask = cache_.best_ask;
+  s.mid = cache_.mid;
+  s.last_trade = cache_.last_trade;
+
+  const std::size_t n = std::min<std::size_t>(max_trades, cache_.trades.size());
+  s.recent_trades.reserve(n);
+
+  // return most-recent-first or oldest-first? gateway handles; keep newest-first is convenient
+  for (std::size_t i = 0; i < n; ++i) {
+    const auto& t = cache_.trades[cache_.trades.size() - 1 - i];
+    s.recent_trades.push_back(t);
+  }
   return s;
 }
 
-std::vector<Trade> LiveWorld::snapshot_recent_trades(std::size_t limit) const {
-  std::lock_guard<std::mutex> lk(mu_);
-  const std::size_t n = std::min(limit, trades_.size());
-  std::vector<Trade> out;
-  out.reserve(n);
-  for (std::size_t i = 0; i < n; ++i) out.push_back(trades_[i]);
-  return out; // newest-first
-}
+std::vector<LiveMidPoint> LiveWorld::mid_series(Ts window_ns) const {
+  std::lock_guard<std::mutex> lk(cache_mtx_);
 
-std::vector<BookTop> LiveWorld::snapshot_top_points(std::size_t points) const {
-  std::lock_guard<std::mutex> lk(mu_);
-  const std::size_t n = std::min(points, tops_.size());
-  std::vector<BookTop> out;
-  out.reserve(n);
+  std::vector<LiveMidPoint> out;
+  if (cache_.tops.empty()) return out;
 
-  // take last n points, but return oldest-first
-  const std::size_t start = tops_.size() - n;
-  for (std::size_t i = start; i < tops_.size(); ++i) out.push_back(tops_[i]);
+  const Ts t1 = cache_.tops.back().ts;
+  const Ts t0 = (t1 > window_ns) ? (t1 - window_ns) : 0;
+
+  // collect all points in [t0, t1]
+  for (const auto& x : cache_.tops) {
+    if (x.ts < t0) continue;
+    LiveMidPoint p{};
+    p.ts = x.ts;
+    p.mid = x.mid;
+    out.push_back(p);
+  }
   return out;
 }
 
-LiveWorld::BookDepth LiveWorld::snapshot_depth(std::size_t levels) const {
-  std::lock_guard<std::mutex> lk(mu_);
-  BookDepth bd{};
-  bd.bids = extract_depth_(engine_.book(), Side::Buy, levels);
-  bd.asks = extract_depth_(engine_.book(), Side::Sell, levels);
-  return bd;
-}
+LiveBookDepth LiveWorld::book_depth(std::size_t levels) const {
+  std::lock_guard<std::mutex> lk(cache_mtx_);
+  LiveBookDepth out{};
 
-OrderId LiveWorld::make_scoped_id_(OwnerId owner) {
-  // owner in high bits, local seq in low bits
-  const uint64_t hi = (static_cast<uint64_t>(owner) & 0xFFFF'FFFFull) << 32;
-  const uint64_t lo = static_cast<uint64_t>(local_seq_++);
-  return static_cast<OrderId>(hi | lo);
+  const std::size_t nb = std::min<std::size_t>(levels, cache_.depth.bids.size());
+  const std::size_t na = std::min<std::size_t>(levels, cache_.depth.asks.size());
+
+  out.bids.assign(cache_.depth.bids.begin(), cache_.depth.bids.begin() + nb);
+  out.asks.assign(cache_.depth.asks.begin(), cache_.depth.asks.begin() + na);
+  return out;
 }
 
 OrderAck LiveWorld::submit_order(Order o) {
-  std::lock_guard<std::mutex> lk(mu_);
+  // assign owner+id if caller didn't
+  if (o.owner == 0) o.owner = OwnerId{999};
 
-  o.ts = ts_;
-  if (o.id == 0) o.id = make_scoped_id_(o.owner);
+  if (o.id == 0) {
+    const uint32_t seq = manual_seq_.fetch_add(1);
+    o.id = next_order_id_(o.owner, seq);
+  }
 
-  order_meta_[o.id] = OrderMeta{o.owner, o.side};
+  // use latest engine time
+  o.ts = cur_ts_.load();
+
+  std::lock_guard<std::mutex> lk(engine_mtx_);
 
   auto res = engine_.process(o);
 
-  if (!res.trades.empty()) {
-    // prepend newest trades
-    for (auto it = res.trades.rbegin(); it != res.trades.rend(); ++it) {
-      trades_.push_front(*it);
-    }
-    while (trades_.size() > kMaxTrades) trades_.pop_back();
+  OrderAck ack{};
+  ack.id = o.id;
 
-    const auto bb = engine_.book().best_bid();
-    const auto ba = engine_.book().best_ask();
-    const auto mid = midprice(bb, ba);
-    apply_trades_to_accounts(ts_, res.trades, order_meta_, accounts_, mid);
+  // MatchResult in your project does NOT have .ack — extract what exists
+  if constexpr (requires { res.status; }) {
+    ack.status = res.status;
+  } else {
+    // fallback: if process() doesn't expose status, treat "no reject_reason" as accepted
+    ack.status = OrderStatus::Accepted;
   }
 
-  return res.ack;
+  if constexpr (requires { res.reject_reason; }) {
+    ack.reject_reason = res.reject_reason;
+  } else {
+    ack.reject_reason = RejectReason::None;
+  }
+
+  update_cache_with_engine_locked_(o.ts, res.trades);
+  return ack;
 }
 
 bool LiveWorld::cancel_order(OrderId id) {
-  std::lock_guard<std::mutex> lk(mu_);
-  return engine_.book_mut().cancel(id);
+  std::lock_guard<std::mutex> lk(engine_mtx_);
+  const bool ok = engine_.book_mut().cancel(id);
+  update_cache_with_engine_locked_(cur_ts_.load(), {});
+  return ok;
 }
 
 bool LiveWorld::modify_qty(OrderId id, Qty new_qty) {
-  std::lock_guard<std::mutex> lk(mu_);
-  return engine_.book_mut().modify_qty(id, new_qty);
+  std::lock_guard<std::mutex> lk(engine_mtx_);
+  const bool ok = engine_.book_mut().modify_qty(id, new_qty);
+  update_cache_with_engine_locked_(cur_ts_.load(), {});
+  return ok;
 }
 
-void LiveWorld::loop_() {
-  using namespace std::chrono;
+void LiveWorld::update_cache_with_engine_locked_(Ts ts, const std::vector<Trade>& new_trades) {
+  std::lock_guard<std::mutex> lk(cache_mtx_);
 
+  cache_.ts = ts;
+  cache_.best_bid = engine_.book().best_bid();
+  cache_.best_ask = engine_.book().best_ask();
+  cache_.mid = compute_mid_(cache_.best_bid, cache_.best_ask);
+  cache_.last_trade = engine_.rules().last_trade_price();
+
+  // trades (bounded)
+  for (const auto& t : new_trades) {
+    cache_.trades.push_back(t);
+    if (cache_.trades.size() > max_cache_trades_) cache_.trades.pop_front();
+  }
+
+  // top series (bounded)
+  BookTop top{};
+  top.ts = ts;
+  top.best_bid = cache_.best_bid;
+  top.best_ask = cache_.best_ask;
+  top.mid = cache_.mid;
+  cache_.tops.push_back(top);
+  if (cache_.tops.size() > max_cache_tops_) cache_.tops.pop_front();
+
+  // depth cache (top-N)
+  LiveBookDepth bd{};
+  bd.bids = extract_depth_(engine_.book(), Side::Buy, depth_cache_levels_);
+  bd.asks = extract_depth_(engine_.book(), Side::Sell, depth_cache_levels_);
+  cache_.depth = std::move(bd);
+}
+
+void LiveWorld::worker_() {
+  const Ts t_end = static_cast<Ts>(std::llround(horizon_s_ * 1'000'000'000.0));
   const Ts dt = std::max<Ts>(1, cfg_.dt_ns);
-  const auto wall_dt = nanoseconds(static_cast<long long>(dt));
 
-  for (;;) {
-    if (!running_.load()) break;
+  for (Ts ts = 0; ts <= t_end; ts += dt) {
+    if (stop_.load()) break;
 
-    {
-      std::lock_guard<std::mutex> lk(mu_);
+    cur_ts_.store(ts);
 
-      // stop at end-of-horizon (but keep serving UI)
-      if (ts_ >= t_end_) {
-        // just keep last snapshot; no more stepping
-      } else {
-        // timed flush (auctions/phase transitions)
-        {
-          auto flushed = engine_.flush(ts_);
-          if (!flushed.empty()) {
-            // prepend newest
-            for (auto it = flushed.rbegin(); it != flushed.rend(); ++it) {
-              trades_.push_front(*it);
-            }
-            while (trades_.size() > kMaxTrades) trades_.pop_back();
+    std::lock_guard<std::mutex> lk(engine_mtx_);
 
-            const auto bb = engine_.book().best_bid();
-            const auto ba = engine_.book().best_ask();
-            const auto mid = midprice(bb, ba);
-            apply_trades_to_accounts(ts_, flushed, order_meta_, accounts_, mid);
-          }
+    // flush timed transitions (auctions/halts/etc)
+    auto flushed = engine_.flush(ts);
+    if (!flushed.empty()) update_cache_with_engine_locked_(ts, flushed);
+
+    // build view for agents from current book
+    const auto bb = engine_.book().best_bid();
+    const auto ba = engine_.book().best_ask();
+    const auto mid = compute_mid_(bb, ba);
+
+    MarketView view{};
+    view.ts = ts;
+    view.best_bid = bb;
+    view.best_ask = ba;
+    view.mid = mid;
+    view.last_trade = engine_.rules().last_trade_price();
+
+    // deterministic agent stepping order
+    for (auto& ap : agents_) {
+      AgentState self{};
+      self.owner = ap->owner();
+      std::vector<Action> actions;
+      actions.reserve(8);
+
+      ap->step(ts, view, self, actions);
+
+      for (auto act : actions) {
+        if (act.type == ActionType::Submit) {
+          Order o = act.order;
+          o.ts = ts;
+          auto res = engine_.process(o);
+          if (!res.trades.empty()) update_cache_with_engine_locked_(ts, res.trades);
+        } else if (act.type == ActionType::Cancel) {
+          engine_.book_mut().cancel(act.id);
+          update_cache_with_engine_locked_(ts, {});
+        } else {
+          engine_.book_mut().modify_qty(act.id, act.new_qty);
+          update_cache_with_engine_locked_(ts, {});
         }
-
-        const auto bb = engine_.book().best_bid();
-        const auto ba = engine_.book().best_ask();
-        const auto mid = midprice(bb, ba);
-
-        MarketView view{};
-        view.ts = ts_;
-        view.best_bid = bb;
-        view.best_ask = ba;
-        view.mid = mid;
-        view.last_trade = engine_.rules().last_trade_price();
-
-        // deterministic per-agent stepping (in insertion order)
-        for (auto& ap : agents_) {
-          const OwnerId oid = ap->owner();
-
-          AgentState self{};
-          self.owner = oid;
-          if (const auto it = accounts_.find(oid); it != accounts_.end()) {
-            self.cash_ticks = it->second.cash_ticks;
-            self.position = it->second.position;
-          }
-
-          std::vector<Action> actions;
-          actions.reserve(8);
-          ap->step(ts_, view, self, actions);
-
-          for (const auto& act : actions) {
-            if (act.type == ActionType::Submit) {
-              Order oo = act.order;
-              oo.ts = ts_;
-              if (oo.id == 0) oo.id = make_scoped_id_(oo.owner);
-
-              order_meta_[oo.id] = OrderMeta{oo.owner, oo.side};
-
-              auto res = engine_.process(oo);
-              if (!res.trades.empty()) {
-                for (auto it = res.trades.rbegin(); it != res.trades.rend(); ++it) {
-                  trades_.push_front(*it);
-                }
-                while (trades_.size() > kMaxTrades) trades_.pop_back();
-
-                const auto bb2 = engine_.book().best_bid();
-                const auto ba2 = engine_.book().best_ask();
-                const auto mid2 = midprice(bb2, ba2);
-                apply_trades_to_accounts(ts_, res.trades, order_meta_, accounts_, mid2);
-              }
-            } else if (act.type == ActionType::Cancel) {
-              (void)engine_.book_mut().cancel(act.id);
-            } else if (act.type == ActionType::ModifyQty) {
-              (void)engine_.book_mut().modify_qty(act.id, act.new_qty);
-            }
-          }
-        }
-
-        // record top-of-book
-        BookTop top{};
-        top.ts = ts_;
-        top.best_bid = engine_.book().best_bid();
-        top.best_ask = engine_.book().best_ask();
-        top.mid = midprice(top.best_bid, top.best_ask);
-        tops_.push_back(top);
-        while (tops_.size() > kMaxTops) tops_.pop_front();
-
-        ts_ += dt;
       }
     }
 
-    std::this_thread::sleep_for(wall_dt);
+    // record top even if no trades (keeps chart smooth)
+    update_cache_with_engine_locked_(ts, {});
   }
+
+  running_.store(false);
 }
 
 } // namespace msim
