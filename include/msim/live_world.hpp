@@ -1,101 +1,152 @@
 #pragma once
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
-#include <memory>
 #include <mutex>
 #include <optional>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "msim/ledger.hpp"
 #include "msim/matching_engine.hpp"
-#include "msim/simulator.hpp" // BookTop
-#include "msim/world.hpp"     // IAgent, Action, MarketView, AgentState, WorldConfig
+#include "msim/simulator.hpp" // BookTop + midprice()
+#include "msim/world.hpp"
+
+// agents (used internally for live simulation)
+#include "msim/agents/noise_trader.hpp"
+#include "msim/agents/market_maker.hpp"
 
 namespace msim {
 
-struct LiveSnapshot {
-  Ts ts{0};
-  std::optional<Price> best_bid{};
-  std::optional<Price> best_ask{};
-  std::optional<Price> mid{};
-  std::optional<Price> last_trade{};
-  std::vector<Trade> recent_trades{};
-};
-
-struct LiveSeriesPoint {
-  Ts ts{0};
-  std::optional<Price> mid{};
-};
-
 class LiveWorld {
 public:
-  explicit LiveWorld(MatchingEngine engine);
-  ~LiveWorld();
-
-  LiveWorld(const LiveWorld&) = delete;
-  LiveWorld& operator=(const LiveWorld&) = delete;
-
-  void add_agent(std::unique_ptr<IAgent> a);
-
-  // Starts a background thread that advances "exchange time" in dt_ns steps.
-  void start(uint64_t seed, double horizon_seconds, WorldConfig cfg = {});
-  void stop();
-  bool running() const noexcept { return running_.load(std::memory_order_relaxed); }
-
-  // Manual order entry (from UI). These are queued and applied on the simulation thread.
-  // If id==0, LiveWorld assigns a deterministic unique id for the owner.
-  struct SubmitAck {
-    OrderId id{0};
-    OrderStatus status{OrderStatus::Accepted};
-    RejectReason reject_reason{RejectReason::None};
+  struct DepthLevel {
+    Price px{};
+    Qty qty{};
   };
 
-  SubmitAck submit_order(Order o);
+  struct BookDepth {
+    std::vector<DepthLevel> bids; // best -> worse
+    std::vector<DepthLevel> asks; // best -> worse
+  };
+
+  struct Snapshot {
+    Ts ts{};
+    std::optional<Price> best_bid{};
+    std::optional<Price> best_ask{};
+    std::optional<Price> mid{};
+    std::optional<Price> last_trade{};
+  };
+
+  LiveWorld(MatchingEngine engine, WorldConfig cfg, uint64_t seed, double horizon_seconds);
+  ~LiveWorld();
+
+  void start();
+  void stop();
+
+  // Lightweight “current market” snapshot
+  Snapshot snapshot() const;
+
+  // Recent trades (newest-first)
+  std::vector<Trade> snapshot_recent_trades(std::size_t limit) const;
+
+  // Mid series as BookTop points (oldest-first, last N points)
+  std::vector<BookTop> snapshot_top_points(std::size_t points) const;
+
+  // L2 depth (top-N levels)
+  BookDepth snapshot_depth(std::size_t levels) const;
+
+  // Manual trading API (used by HTTP gateway)
+  OrderAck submit_order(Order o);
   bool cancel_order(OrderId id);
   bool modify_qty(OrderId id, Qty new_qty);
 
-  LiveSnapshot snapshot(std::size_t max_trades = 200) const;
-  std::vector<LiveSeriesPoint> mid_series(Ts window_ns) const;
+private:
+  static uint64_t splitmix64(uint64_t& x) noexcept;
+
+  void loop_();
+
+  OrderId make_scoped_id_(OwnerId owner);
+
+  // depth extraction that tolerates different book APIs
+  template <class X>
+  static DepthLevel to_level_(const X& x) {
+    if constexpr (requires { x.price; x.qty; }) {
+      return DepthLevel{static_cast<Price>(x.price), static_cast<Qty>(x.qty)};
+    } else if constexpr (requires { x.px; x.qty; }) {
+      return DepthLevel{static_cast<Price>(x.px), static_cast<Qty>(x.qty)};
+    } else {
+      return DepthLevel{static_cast<Price>(x.first), static_cast<Qty>(x.second)};
+    }
+  }
+
+  template <class Book>
+  static std::vector<DepthLevel> extract_depth_(const Book& book, Side side, std::size_t n) {
+    std::vector<DepthLevel> out;
+    out.reserve(n);
+
+    // Try a few common APIs via C++20 requires (only the valid one compiles in)
+    if constexpr (requires { book.depth(side, n); }) {
+      auto d = book.depth(side, n);
+      for (const auto& x : d) {
+        out.push_back(to_level_(x));
+        if (out.size() >= n) break;
+      }
+      return out;
+    } else if constexpr (requires { book.depth(side); }) {
+      auto d = book.depth(side);
+      for (const auto& x : d) {
+        out.push_back(to_level_(x));
+        if (out.size() >= n) break;
+      }
+      return out;
+    } else if constexpr (requires { book.depth_top_n(side, n); }) {
+      auto d = book.depth_top_n(side, n);
+      for (const auto& x : d) {
+        out.push_back(to_level_(x));
+        if (out.size() >= n) break;
+      }
+      return out;
+    } else if constexpr (requires { book.top_levels(side, n); }) {
+      auto d = book.top_levels(side, n);
+      for (const auto& x : d) {
+        out.push_back(to_level_(x));
+        if (out.size() >= n) break;
+      }
+      return out;
+    } else {
+      // If none exists, return empty (UI will just show blanks).
+      return out;
+    }
+  }
 
 private:
-  enum class CmdType : uint8_t { Submit = 0, Cancel = 1, ModifyQty = 2 };
+  // config
+  WorldConfig cfg_{};
+  uint64_t seed_{1};
+  Ts t_end_{0};
 
-  struct Cmd {
-    CmdType type{CmdType::Submit};
-    Order order{};
-    OrderId id{0};
-    Qty new_qty{0};
-  };
-
-  void loop_(uint64_t seed, double horizon_seconds, WorldConfig cfg);
-
-  static uint64_t splitmix64_(uint64_t& x) noexcept;
-  OrderId next_manual_id_(OwnerId owner) noexcept;
-
-  // --- mutable shared state guarded by m_ ---
-  mutable std::mutex m_;
-
+  // engine + sim state (guarded by mu_)
+  mutable std::mutex mu_;
   MatchingEngine engine_;
-  std::vector<std::unique_ptr<IAgent>> agents_;
+  Ts ts_{0};
+
+  std::deque<Trade> trades_;   // newest-first
+  std::deque<BookTop> tops_;   // oldest-first
 
   std::unordered_map<OrderId, OrderMeta> order_meta_;
   std::unordered_map<OwnerId, Account> accounts_;
 
-  std::deque<Trade> trades_buf_;
-  std::deque<BookTop> tops_buf_;
+  // agents
+  std::vector<std::unique_ptr<IAgent>> agents_;
+  uint32_t local_seq_{1};
 
-  std::deque<Cmd> pending_;
-
-  Ts current_ts_{0};
-  uint32_t manual_seq_{1};
-
-  // --- thread control ---
+  // thread
   std::atomic<bool> running_{false};
-  std::atomic<bool> stop_req_{false};
-  std::thread th_;
+  std::thread worker_;
 };
 
 } // namespace msim
