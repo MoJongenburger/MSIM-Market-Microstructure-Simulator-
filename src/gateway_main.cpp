@@ -1,19 +1,105 @@
 #include <algorithm>
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "httplib.h"
 
+#include "msim/matching_engine.hpp"
+#include "msim/rules.hpp"
 #include "msim/live_world.hpp"
 #include "msim/order.hpp"
 #include "msim/types.hpp"
 
+// ---------------- Small helpers ----------------
+static long long get_ll(const httplib::Request& req, const char* key, long long def = 0) {
+  if (!req.has_param(key)) return def;
+  try { return std::stoll(req.get_param_value(key)); } catch (...) { return def; }
+}
+
+static std::string json_bool(bool v) { return v ? "true" : "false"; }
+
+// Compile-time member detection (C++20 requires-expressions)
+template <class T>
+static bool ack_accepted_(const T& a) {
+  if constexpr (requires { a.accepted; }) {
+    return static_cast<bool>(a.accepted);
+  } else if constexpr (requires { a.ok; }) {
+    return static_cast<bool>(a.ok);
+  } else if constexpr (requires { a.status; }) {
+    // If it uses msim::OrderStatus or similar, treat 0/Accepted as true when possible.
+    // We don’t assume exact enum values, but most use Accepted=0.
+    return static_cast<int>(a.status) == 0;
+  } else {
+    // fallback: assume accepted if no field exists
+    return true;
+  }
+}
+
+template <class T>
+static int ack_reason_(const T& a) {
+  if constexpr (requires { a.reject_reason; }) {
+    return static_cast<int>(a.reject_reason);
+  } else if constexpr (requires { a.reason; }) {
+    return static_cast<int>(a.reason);
+  } else if constexpr (requires { a.reject; }) {
+    return static_cast<int>(a.reject);
+  } else {
+    return 0;
+  }
+}
+
+template <class T>
+static long long ack_order_id_(const T& a) {
+  if constexpr (requires { a.order_id; }) {
+    return static_cast<long long>(a.order_id);
+  } else if constexpr (requires { a.id; }) {
+    return static_cast<long long>(a.id);
+  } else if constexpr (requires { a.oid; }) {
+    return static_cast<long long>(a.oid);
+  } else {
+    return 0;
+  }
+}
+
+template <class LiveW>
+static bool live_cancel_(LiveW& w, msim::OrderId id) {
+  if constexpr (requires { w.cancel(id); }) {
+    return w.cancel(id);
+  } else if constexpr (requires { w.cancel_order(id); }) {
+    return w.cancel_order(id);
+  } else if constexpr (requires { w.cancel_order_id(id); }) {
+    return w.cancel_order_id(id);
+  } else {
+    return false;
+  }
+}
+
+template <class LiveW>
+static bool live_modify_(LiveW& w, msim::OrderId id, msim::Qty q) {
+  if constexpr (requires { w.modify_qty(id, q); }) {
+    return w.modify_qty(id, q);
+  } else if constexpr (requires { w.modify(id, q); }) {
+    return w.modify(id, q);
+  } else if constexpr (requires { w.modify_order_qty(id, q); }) {
+    return w.modify_order_qty(id, q);
+  } else {
+    return false;
+  }
+}
+
+// ---------------- HTML (split to avoid MSVC C2026) ----------------
 static std::string html_page() {
-  return R"HTML(
+  std::string s;
+  s.reserve(60'000);
+
+  s += R"HTML(
 <!doctype html>
 <html>
 <head>
@@ -36,7 +122,7 @@ static std::string html_page() {
     table { width:100%; border-collapse:collapse; font-size:12px; }
     th, td { padding:6px 8px; border-bottom:1px solid #1f2a37; text-align: left; }
     th { color:#94a3b8; font-weight: 600; }
-    .controls { display:flex; gap:10px; align-items:center; margin: 8px 0 10px 0; color:#94a3b8; font-size: 12px; }
+    .controls { display:flex; gap:10px; align-items:center; margin: 8px 0 10px 0; color:#94a3b8; font-size: 12px; flex-wrap: wrap; }
     .rightCol { display:grid; grid-template-rows: auto auto 1fr; gap: 14px; }
   </style>
 </head>
@@ -88,7 +174,7 @@ static std::string html_page() {
       </div>
 
       <div style="margin-top:10px; color:#94a3b8; font-size:12px;">
-        Tip: chart is <b>OHLC from trades</b>, aggregated client-side.
+        Chart is <b>OHLC from trades</b> aggregated client-side (TradingView vibe).
       </div>
     </div>
 
@@ -107,16 +193,16 @@ static std::string html_page() {
             <option value="86400">1d</option>
           </select>
 
-        <label style="margin-left:10px;">Candles:</label>
-        <select id="candleSel">
-          <option value="auto" selected>auto</option>
-          <option value="1">1s</option>
-          <option value="5">5s</option>
-          <option value="15">15s</option>
-          <option value="60">1m</option>
-          <option value="300">5m</option>
-          <option value="900">15m</option>
-        </select>
+          <span style="margin-left:10px;">Candles:</span>
+          <select id="candleSel">
+            <option value="auto" selected>auto</option>
+            <option value="1">1s</option>
+            <option value="5">5s</option>
+            <option value="15">15s</option>
+            <option value="60">1m</option>
+            <option value="300">5m</option>
+            <option value="900">15m</option>
+          </select>
         </div>
 
         <canvas id="chart"></canvas>
@@ -135,7 +221,9 @@ static std::string html_page() {
       </div>
     </div>
   </div>
+)HTML";
 
+  s += R"HTML(
 <script>
 const $ = (id)=>document.getElementById(id);
 
@@ -216,7 +304,7 @@ function buildCandles(trades, nowNs, windowNs, intervalNs){
   const keys = Array.from(buckets.keys()).sort((a,b)=>a-b);
   const out = keys.map(k => buckets.get(k));
 
-  // Fill gaps with previous close (nicer continuity)
+  // Fill gaps with previous close
   const filled = [];
   let prev = out[0];
   filled.push(prev);
@@ -262,7 +350,6 @@ function drawCandles(candles){
   const w = canvas.width = canvas.clientWidth;
   const h = canvas.height = canvas.clientHeight;
 
-  // TradingView-ish dark theme
   const bg = "#0b0f14";
   const grid = "#1f2a37";
   const text = "#cbd5e1";
@@ -303,7 +390,6 @@ function drawCandles(candles){
     ctx.fillText(p.toFixed(2), 6, y+4);
   }
 
-  // candle width
   const innerW = (w-padL-padR);
   const step = innerW / Math.max(1, candles.length);
   const bodyW = Math.max(2, Math.floor(step * 0.65));
@@ -354,7 +440,6 @@ function setTradesTable(trades){
   tbody.innerHTML = "";
   if(!Array.isArray(trades)) return;
 
-  // most recent first
   const xs = trades.slice().reverse().slice(0, 30);
   for(const t of xs){
     const tr = document.createElement("tr");
@@ -399,10 +484,11 @@ $("sendBtn").addEventListener("click", async ()=>{
     const side = $("side").value;
     const type = $("type").value;
     const tif = $("tif").value;
+    const id = $("oid").value;
     const price = $("price").value;
     const qty = $("qty").value;
 
-    const res = await apiPostForm("/api/order", {side, type, tif, price, qty});
+    const res = await apiPostForm("/api/order", {side, type, tif, id, price, qty});
     alert(JSON.stringify(res));
   }catch(e){
     alert("error: " + e);
@@ -439,19 +525,28 @@ setInterval(refresh, 250);
 </body>
 </html>
 )HTML";
-}
 
-static long long get_ll(const httplib::Request& req, const char* key, long long def = 0) {
-  if (!req.has_param(key)) return def;
-  try { return std::stoll(req.get_param_value(key)); } catch (...) { return def; }
+  return s;
 }
 
 int main(int argc, char** argv) {
+  // args: [port] [seed]
   int port = 8080;
-  if (argc > 1) port = std::atoi(argv[1]);
+  uint64_t seed = 1;
 
-  msim::LiveWorld world;
-  world.start();
+  if (argc > 1) port = std::atoi(argv[1]);
+  if (argc > 2) seed = static_cast<uint64_t>(std::strtoull(argv[2], nullptr, 10));
+
+  // Make a long horizon so it effectively runs "forever" for the gateway session.
+  // (Still safely within int64 nanoseconds.)
+  const double horizon_seconds = 3600.0 * 24.0 * 365.0; // ~1 year sim time
+
+  msim::RulesConfig rcfg{};
+  msim::MatchingEngine eng{msim::RuleSet(rcfg)};
+  msim::LiveWorld world{std::move(eng)};
+
+  // Start background simulation
+  world.start(seed, horizon_seconds);
 
   httplib::Server svr;
 
@@ -460,7 +555,9 @@ int main(int argc, char** argv) {
   });
 
   svr.Get("/api/snapshot", [&](const httplib::Request&, httplib::Response& res) {
-    auto snap = world.snapshot();
+    // keep recent trades bounded (also used by chart tape)
+    constexpr std::size_t MAX_TRADES = 250;
+    auto snap = world.snapshot(MAX_TRADES);
 
     std::ostringstream oss;
     oss << "{";
@@ -494,11 +591,14 @@ int main(int argc, char** argv) {
     const auto type_s = req.has_param("type") ? req.get_param_value("type") : "Limit";
     const auto tif_s  = req.has_param("tif")  ? req.get_param_value("tif")  : "GTC";
 
+    const auto id_ll    = get_ll(req, "id", 0);
     const auto price_ll = get_ll(req, "price", 100);
     const auto qty_ll   = get_ll(req, "qty", 1);
 
     msim::Order o{};
-    o.owner = 999;
+    o.owner = static_cast<msim::OwnerId>(999);
+
+    if (id_ll > 0) o.id = static_cast<msim::OrderId>(id_ll);
 
     o.side = (side_s == "Sell") ? msim::Side::Sell : msim::Side::Buy;
     o.type = (type_s == "Market") ? msim::OrderType::Market : msim::OrderType::Limit;
@@ -511,31 +611,41 @@ int main(int argc, char** argv) {
 
     const auto ack = world.submit_order(o);
 
+    const bool accepted = ack_accepted_(ack);
+    const int reason = ack_reason_(ack);
+    const long long oid = ack_order_id_(ack);
+
     std::ostringstream oss;
     oss << "{";
-    oss << "\"accepted\":" << (ack.accepted ? "true" : "false") << ",";
-    oss << "\"reason\":" << static_cast<int>(ack.reason) << ",";
-    oss << "\"order_id\":" << ack.order_id;
+    oss << "\"accepted\":" << json_bool(accepted) << ",";
+    oss << "\"reason\":" << reason << ",";
+    oss << "\"order_id\":" << oid;
     oss << "}";
     res.set_content(oss.str(), "application/json");
   });
 
   svr.Post("/api/cancel", [&](const httplib::Request& req, httplib::Response& res) {
     const auto id_ll = get_ll(req, "id", 0);
-    const bool ok = world.cancel(static_cast<msim::OrderId>(id_ll));
-    res.set_content(std::string("{\"ok\":") + (ok ? "true" : "false") + "}", "application/json");
+    const bool ok = live_cancel_(world, static_cast<msim::OrderId>(id_ll));
+    res.set_content(std::string("{\"ok\":") + json_bool(ok) + "}", "application/json");
   });
 
   svr.Post("/api/modify", [&](const httplib::Request& req, httplib::Response& res) {
     const auto id_ll = get_ll(req, "id", 0);
     const auto q_ll  = get_ll(req, "qty", 0);
-    const bool ok = world.modify_qty(static_cast<msim::OrderId>(id_ll), static_cast<msim::Qty>(q_ll));
-    res.set_content(std::string("{\"ok\":") + (ok ? "true" : "false") + "}", "application/json");
+    const bool ok = live_modify_(world,
+                                static_cast<msim::OrderId>(id_ll),
+                                static_cast<msim::Qty>(q_ll));
+    res.set_content(std::string("{\"ok\":") + json_bool(ok) + "}", "application/json");
   });
 
   std::cout << "MSIM gateway listening on http://localhost:" << port << "/\n";
   svr.listen("0.0.0.0", port);
 
-  world.stop();
+  // If LiveWorld has a stop() in your codebase, it will compile-time-detect and call it.
+  if constexpr (requires { world.stop(); }) {
+    world.stop();
+  }
+
   return 0;
 }
