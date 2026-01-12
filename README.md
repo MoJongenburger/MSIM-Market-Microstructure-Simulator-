@@ -192,7 +192,3 @@ web/                  # browser UI served by gateway
 * Stop / stop-limit orders
 * Iceberg orders
 * Benchmarks + profiling + performance charts
-
----
-
-If you want, paste your current `README.md` file content exactly as it exists in your repo and I’ll align wording/commands/ports 1:1 with your actual gateway defaults (so it’s impossible to misunderstand).
