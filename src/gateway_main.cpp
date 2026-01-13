@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -26,26 +27,49 @@
 // ---------------- Tunables (static storage => no lambda capture issues) ----------------
 namespace {
 
+// ---- Market maker ladder depth ----
 constexpr std::size_t kMMLevels = 5;
 
-// Keep top-of-book deep so aggressor market orders usually produce ~1 trade per order
+// Keep top-of-book deep so aggressor market orders usually produce ~1 trade/order
 constexpr msim::Qty kMMQtyL1   = 50'000;
 constexpr msim::Qty kMMQtyStep = 10'000;
 
 // How often the MM re-quotes the whole ladder
-constexpr int kMMRefreshMs = 250;
+constexpr int kMMRefreshMs = 200;
 
-// Aggressor threads (market orders) => drives trade rate
+// ---- Aggressor flow (drives trades/sec) ----
 constexpr int kAggressorThreads = 2;
-constexpr int kAggressorSleepMs = 2;   // 2ms => ~500 orders/sec/thread => ~1000 orders/sec total
 
+// Random sleep in [min,max] ms per order => controls orders/sec
+constexpr int kAggressorSleepMinMs = 1;
+constexpr int kAggressorSleepMaxMs = 3;
+
+// Small orders are common
 constexpr msim::Qty kAggrMinQ = 1;
 constexpr msim::Qty kAggrMaxQ = 25;
 
-// Fundamental drift => makes price change every ~3–6 seconds
-constexpr int kFundMinMs = 3000;
-constexpr int kFundMaxMs = 6000;
-constexpr int kFundStepTicks = 1;
+// Big sweep orders occasionally to move last price across levels
+constexpr int kBigTradeEveryN = 25;
+constexpr msim::Qty kBigMinQ = 50;
+constexpr msim::Qty kBigMaxQ = 250;
+
+// ---- Fundamental process (drives “market drift”) ----
+// Regime changes every ~3–6 seconds (buy vs sell pressure)
+constexpr int kRegimeMinMs = 3000;
+constexpr int kRegimeMaxMs = 6000;
+
+// Fundamental random walk step every 50ms
+constexpr int kFundStepMs = 50;
+
+// Vol per step in ticks (0.3–1.2 are reasonable)
+constexpr double kFundSigmaTicks = 0.60;
+
+// Small drift per step when regime bias is active
+constexpr double kFundDriftTicks = 0.15;
+
+// Occasional discrete jump when regime changes (in ticks)
+constexpr int kRegimeJumpMinTicks = 1;
+constexpr int kRegimeJumpMaxTicks = 6;
 
 } // namespace
 
@@ -144,6 +168,7 @@ static msim::OrderId make_oid_(msim::OwnerId owner, std::uint32_t seq) noexcept 
 
 struct FlowThreads {
   std::shared_ptr<std::atomic<bool>> running;
+  std::thread regime_thread;
   std::thread fundamental_thread;
   std::thread mm_thread;
   std::vector<std::thread> aggressors;
@@ -157,21 +182,61 @@ static FlowThreads start_background_flow(msim::LiveWorld& world,
   auto run = ft.running;
 
   const msim::Price tick = std::max<msim::Price>(1, static_cast<msim::Price>(rcfg.tick_size_ticks));
-  auto fundamental_px = std::make_shared<std::atomic<long long>>(100LL);
 
-  // ---- Fundamental updater (drift every ~3–6s) ----
-  ft.fundamental_thread = std::thread([run, fundamental_px, seed, tick]() {
-    std::mt19937_64 rng(static_cast<std::mt19937_64::result_type>(seed) ^
-                        static_cast<std::mt19937_64::result_type>(0xA5A5A5A5A5A5A5A5ull));
-    std::uniform_int_distribution<int> sleep_ms(kFundMinMs, kFundMaxMs);
-    std::uniform_int_distribution<int> dir(-1, 1);
+  // fundamental in "price ticks"
+  auto fundamental_px = std::make_shared<std::atomic<long long>>(static_cast<long long>(100 * tick));
+
+  // bias: -1 sell pressure, 0 neutral, +1 buy pressure
+  auto bias = std::make_shared<std::atomic<int>>(0);
+
+  // ---- Regime thread: every 3–6s choose bias + optional jump ----
+  ft.regime_thread = std::thread([run, fundamental_px, bias, seed, tick]() {
+    using RT = std::mt19937_64::result_type;
+    std::mt19937_64 rng(static_cast<RT>(seed) ^ static_cast<RT>(0xA5A5A5A5ull));
+    std::uniform_int_distribution<int> sleep_ms(kRegimeMinMs, kRegimeMaxMs);
+    std::uniform_int_distribution<int> pick(0, 2); // 0 sell, 1 neutral, 2 buy
+    std::uniform_int_distribution<int> jump_ticks(kRegimeJumpMinTicks, kRegimeJumpMaxTicks);
 
     while (run->load(std::memory_order_relaxed)) {
       std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms(rng)));
-      const int d = dir(rng);
+
+      const int p = pick(rng);
+      int b = 0;
+      if (p == 0) b = -1;
+      if (p == 2) b = +1;
+
+      bias->store(b, std::memory_order_relaxed);
+
+      // jump on regime change to create visible “level shifts”
+      if (b != 0) {
+        const long long j = static_cast<long long>(jump_ticks(rng)) * static_cast<long long>(tick);
+        const long long cur = fundamental_px->load(std::memory_order_relaxed);
+        long long nxt = (b > 0) ? (cur + j) : (cur - j);
+        if (nxt < static_cast<long long>(tick)) nxt = static_cast<long long>(tick);
+        fundamental_px->store(nxt, std::memory_order_relaxed);
+      }
+    }
+  });
+
+  // ---- Fundamental: random walk every 50ms with drift based on bias ----
+  ft.fundamental_thread = std::thread([run, fundamental_px, bias, seed, tick]() {
+    using RT = std::mt19937_64::result_type;
+    std::mt19937_64 rng(static_cast<RT>(seed) ^ static_cast<RT>(0xC0FFEEull));
+    std::normal_distribution<double> N01(0.0, 1.0);
+
+    while (run->load(std::memory_order_relaxed)) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(kFundStepMs));
+
+      const int b = bias->load(std::memory_order_relaxed);
+      const double drift = kFundDriftTicks * static_cast<double>(b);
+      const double step_ticks = drift + kFundSigmaTicks * N01(rng);
+
+      long long delta = static_cast<long long>(std::llround(step_ticks * static_cast<double>(tick)));
+      // snap to tick
+      if (delta != 0) delta = (delta / static_cast<long long>(tick)) * static_cast<long long>(tick);
 
       long long px = fundamental_px->load(std::memory_order_relaxed);
-      px += static_cast<long long>(d) * static_cast<long long>(kFundStepTicks) * static_cast<long long>(tick);
+      px += delta;
       if (px < static_cast<long long>(tick)) px = static_cast<long long>(tick);
 
       fundamental_px->store(px, std::memory_order_relaxed);
@@ -188,8 +253,8 @@ static FlowThreads start_background_flow(msim::LiveWorld& world,
     bid_ids.fill(static_cast<msim::OrderId>(0));
     ask_ids.fill(static_cast<msim::OrderId>(0));
 
-    std::mt19937_64 rng(static_cast<std::mt19937_64::result_type>(seed) ^
-                        static_cast<std::mt19937_64::result_type>(0xC0FFEEull));
+    using RT = std::mt19937_64::result_type;
+    std::mt19937_64 rng(static_cast<RT>(seed) ^ static_cast<RT>(0xDEADBEEFull));
     std::uniform_int_distribution<int> jitter(-1, 1);
 
     while (run->load(std::memory_order_relaxed)) {
@@ -231,7 +296,6 @@ static FlowThreads start_background_flow(msim::LiveWorld& world,
 
           b.qty = qty;
           b.tif = msim::TimeInForce::GTC;
-
           (void)world.submit_order(b);
           bid_ids[lvl] = b.id;
         }
@@ -250,7 +314,6 @@ static FlowThreads start_background_flow(msim::LiveWorld& world,
 
           a.qty = qty;
           a.tif = msim::TimeInForce::GTC;
-
           (void)world.submit_order(a);
           ask_ids[lvl] = a.id;
         }
@@ -266,10 +329,10 @@ static FlowThreads start_background_flow(msim::LiveWorld& world,
     }
   });
 
-  // ---- Aggressors (market orders => trades/sec) ----
+  // ---- Aggressors (market orders => trades/sec + occasional sweeps) ----
   ft.aggressors.reserve(static_cast<std::size_t>(kAggressorThreads));
   for (int k = 0; k < kAggressorThreads; ++k) {
-    ft.aggressors.emplace_back([run, &world, seed, k]() {
+    ft.aggressors.emplace_back([run, &world, bias, seed, k]() {
       const msim::OwnerId OWNER = static_cast<msim::OwnerId>(100 + k);
       std::uint32_t seq = 1;
 
@@ -277,19 +340,37 @@ static FlowThreads start_background_flow(msim::LiveWorld& world,
       const RT s = static_cast<RT>(seed) ^ (static_cast<RT>(0x1234ABCDull) + static_cast<RT>(k));
       std::mt19937_64 rng(s);
 
+      std::uniform_int_distribution<int> sleep_ms(kAggressorSleepMinMs, kAggressorSleepMaxMs);
       std::uniform_int_distribution<int> side01(0, 1);
-      std::uniform_int_distribution<int> qdist(static_cast<int>(kAggrMinQ), static_cast<int>(kAggrMaxQ));
+      std::uniform_int_distribution<int> q_small(static_cast<int>(kAggrMinQ), static_cast<int>(kAggrMaxQ));
+      std::uniform_int_distribution<int> q_big(static_cast<int>(kBigMinQ), static_cast<int>(kBigMaxQ));
+      std::uniform_real_distribution<double> U01(0.0, 1.0);
+
+      std::uint64_t local_count = 0;
 
       while (run->load(std::memory_order_relaxed)) {
+        ++local_count;
+
+        // biased side selection
+        const int b = bias->load(std::memory_order_relaxed);
+        bool buy = (side01(rng) == 1);
+        if (b > 0) buy = (U01(rng) < 0.65);
+        if (b < 0) buy = (U01(rng) < 0.35);
+
+        msim::Qty q = static_cast<msim::Qty>(q_small(rng));
+        if ((local_count % static_cast<std::uint64_t>(kBigTradeEveryN)) == 0ull) {
+          q = static_cast<msim::Qty>(q_big(rng)); // occasional sweep
+        }
+
         msim::Order o{};
         o.owner = OWNER;
         o.id = make_oid_(OWNER, seq++);
-        o.side = (side01(rng) == 0) ? msim::Side::Buy : msim::Side::Sell;
+        o.side = buy ? msim::Side::Buy : msim::Side::Sell;
 
         o.type = msim::OrderType::Market;
         o.tif = msim::TimeInForce::IOC;
         o.price = 0;
-        o.qty = static_cast<msim::Qty>(qdist(rng));
+        o.qty = q;
 
         if constexpr (requires(msim::Order x) { x.mkt_style = msim::MarketStyle::PureMarket; }) {
           o.mkt_style = msim::MarketStyle::PureMarket;
@@ -297,7 +378,7 @@ static FlowThreads start_background_flow(msim::LiveWorld& world,
 
         (void)world.submit_order(o);
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(kAggressorSleepMs));
+        std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms(rng)));
       }
     });
   }
@@ -308,6 +389,7 @@ static FlowThreads start_background_flow(msim::LiveWorld& world,
 static void stop_background_flow(FlowThreads& ft) {
   if (ft.running) ft.running->store(false, std::memory_order_relaxed);
 
+  if (ft.regime_thread.joinable()) ft.regime_thread.join();
   if (ft.fundamental_thread.joinable()) ft.fundamental_thread.join();
   if (ft.mm_thread.joinable()) ft.mm_thread.join();
 
