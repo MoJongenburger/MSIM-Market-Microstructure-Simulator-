@@ -19,7 +19,7 @@ This keeps the “exchange kernel” small and testable while allowing realistic
 - `engine.process()` tail (**p99**) = **0.091–0.096 µs** (91–96 ns)  
 - Measured with **N = 100–10,000** prefilled resting orders (54 repetitions)
 
-![Latency Benchmark](docs/latency_benchmark.png)
+<img width="2200" height="1000" alt="latency_benchmark" src="https://github.com/user-attachments/assets/7f7dc432-c8f6-4f92-ae0c-128c6c474c61" />
 
 > Interpretation: this is a tight “hot path” benchmark for the matching call with a warmed order book. It is intended to provide objective, reproducible latency evidence (not a full end-to-end trading stack measurement).
 
