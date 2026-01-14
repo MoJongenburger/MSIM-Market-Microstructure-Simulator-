@@ -13,15 +13,34 @@ This keeps the “exchange kernel” small and testable while allowing realistic
 
 ## Performance (Latency Proof)
 
-**Hot-path microbenchmark (Release, warm book; Google Benchmark):**
+MSIM ships with a benchmark suite (Google Benchmark) plus plotting tools that generate latency, throughput, and allocation figures.
 
-- `engine.process()` median (**p50**) = **0.082–0.084 µs** (82–84 ns)  
-- `engine.process()` tail (**p99**) = **0.091–0.096 µs** (91–96 ns)  
-- Measured with **N = 100–10,000** prefilled resting orders (54 repetitions)
+### Hot-path microbenchmark (Release, warm book; Google Benchmark)
 
-<img width="2200" height="1000" alt="latency_benchmark" src="https://github.com/user-attachments/assets/7f7dc432-c8f6-4f92-ae0c-128c6c474c61" />
+Headline (from the benchmark suite on a warm book):
+
+- `engine.process()` median (**p50**) ≈ **~90–95 ns**  
+- `engine.process()` tail (**p99**) ≈ **~94–110 ns**  
+- Measured with **N = 100–10,000** prefilled resting orders (multiple repetitions)
+
+<img width="2420" height="1100" alt="latency_benchmark" src="https://github.com/user-attachments/assets/7b499e66-8139-47e6-90e8-3ccc1af73379" />
 
 > Interpretation: this is a tight “hot path” benchmark for the matching call with a warmed order book. It is intended to provide objective, reproducible latency evidence (not a full end-to-end trading stack measurement).
+
+### Benchmark suite outputs (latency + throughput + allocs)
+
+The suite produces per-operation plots:
+
+- Market order processing (latency/throughput/allocations)
+- Crossing limit IOC processing
+- Resting limit insertion
+- L2 depth snapshot extraction
+
+Example generated plots (kept under `docs/`):
+
+- `docs/latency_box_BM_ProcessMarketOrder.png`
+- `docs/throughput_BM_ProcessMarketOrder.png`
+- `docs/allocs_BM_ProcessMarketOrder.png`
 
 ---
 
@@ -114,7 +133,7 @@ This keeps the “exchange kernel” small and testable while allowing realistic
 ### Engineering quality
 - CMake targets: library + CLI + gateway + tests + benchmarks
 - GoogleTest suite
-- Google Benchmark latency harness + plotting script
+- Google Benchmark harness + plotting scripts
 - CI across Linux / Windows / macOS + Linux sanitizers (ASan/UBSan)
 - Optional warnings-as-errors builds
 
@@ -166,11 +185,17 @@ To stop the gateway cleanly, type `quit` (or `exit`) in the terminal where it’
 
 ## Benchmarks
 
-### Run latency benchmark (Release)
+### Run benchmark suite (Release) + generate plots
 
 ```bash
 ./build/msim_bench --benchmark_format=json --benchmark_out=bench.json
-python tools/plot_latency.py bench.json docs/latency_benchmark.png
+python tools/plot_bench_suite.py bench.json docs
+```
+
+### Run dedicated latency plot (Release)
+
+```bash
+python tools/plot_latency.py bench.json docs/latency_benchmark.png --prefix BM_ProcessMarketOrder
 ```
 
 ---
@@ -184,6 +209,7 @@ src/                  # implementations (engine, world, gateway)
 tests/                # gtests + benchmarks
 tools/                # benchmark plotting scripts
 web/                  # browser UI served by gateway
+docs/                 # generated benchmark plots + summaries
 .github/workflows/    # CI
 ```
 
@@ -198,5 +224,4 @@ web/                  # browser UI served by gateway
 * Stop / stop-limit orders
 * Iceberg orders
 * Additional benchmarks + profiling + performance charts
-
 
