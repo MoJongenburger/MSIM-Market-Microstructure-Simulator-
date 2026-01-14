@@ -8,46 +8,69 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-def _infer_time_unit(benches, default="us"):
+def infer_time_unit(data: dict, default: str = "ns") -> str:
     """
-    Try to infer the time unit from the JSON.
-    Google Benchmark JSON may include: time_unit: "ns"/"us"/"ms"/"s".
-    If absent, assume default (your harness uses microseconds).
+    Infer time unit from Google Benchmark JSON.
+    Common locations:
+      - data["context"]["time_unit"]
+      - each entry: b["time_unit"]
+    If missing, default to ns (your suite plots indicate ns output).
     """
-    # Top-level sometimes has "context": {"time_unit": "..."} depending on version
-    ctx = benches.get("context") if isinstance(benches, dict) else None
-    if isinstance(ctx, dict) and "time_unit" in ctx:
-        return ctx["time_unit"]
+    ctx = data.get("context", {})
+    if isinstance(ctx, dict):
+        tu = ctx.get("time_unit")
+        if isinstance(tu, str) and tu.strip():
+            return tu.strip()
 
-    # Or each benchmark entry may have "time_unit"
-    if isinstance(benches, dict) and "benchmarks" in benches:
-        for b in benches["benchmarks"]:
-            if "time_unit" in b and b["time_unit"]:
-                return b["time_unit"]
+    benches = data.get("benchmarks", [])
+    if isinstance(benches, list):
+        for b in benches:
+            tu = b.get("time_unit")
+            if isinstance(tu, str) and tu.strip():
+                return tu.strip()
 
     return default
 
 
-def _unit_to_us_multiplier(unit: str) -> float:
+def unit_to_seconds(unit: str) -> float:
     unit = unit.lower().strip()
     if unit == "ns":
-        return 1.0 / 1000.0
+        return 1e-9
     if unit == "us":
-        return 1.0
+        return 1e-6
     if unit == "ms":
-        return 1000.0
+        return 1e-3
     if unit == "s":
-        return 1_000_000.0
-    # unknown -> assume us
-    return 1.0
+        return 1.0
+    # unknown -> assume ns
+    return 1e-9
 
 
-def _extract_N(name: str, prefix: str):
-    # Extract first integer after "<prefix>/"
+def convert(value: float, from_unit: str, to_unit: str) -> float:
+    """
+    Convert numeric value from from_unit -> to_unit via seconds.
+    """
+    from_s = unit_to_seconds(from_unit)
+    to_s = unit_to_seconds(to_unit)
+    # value * from_s = seconds, / to_s = new unit
+    return float(value) * (from_s / to_s)
+
+
+def extract_N(name: str, prefix: str):
+    """
+    Extract first integer after '<prefix>/'.
+    Example: BM_ProcessMarketOrder/1000/...
+    """
     m = re.match(rf"^{re.escape(prefix)}/(\d+)", name)
     if not m:
         return None
     return int(m.group(1))
+
+
+def ensure_dir(path: str):
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
 
 
 def main():
@@ -56,6 +79,7 @@ def main():
     ap.add_argument("out_png", help="Output PNG path (e.g. docs/latency_benchmark.png)")
     ap.add_argument("--prefix", default="BM_ProcessMarketOrder", help="Benchmark name prefix to plot")
     ap.add_argument("--logy", action="store_true", help="Use log scale on Y axis")
+    ap.add_argument("--unit", default="", help="Force output unit: ns/us/ms/s (default: keep JSON unit)")
     ap.add_argument("--out_summary", default="", help="Optional path to write summary JSON")
     ap.add_argument("--out_md", default="", help="Optional path to write a README-ready markdown snippet")
     args = ap.parse_args()
@@ -67,14 +91,10 @@ def main():
     if not isinstance(benches, list):
         raise SystemExit("Unexpected benchmark JSON structure: expected data['benchmarks'] to be a list.")
 
-    # Determine unit (fallback = us as in your benchmark config)
-    unit = data.get("context", {}).get("time_unit", "us")
-    # Some benchmark JSON versions might not include it there — infer
-    if not unit:
-        unit = "us"
-    mult_to_us = _unit_to_us_multiplier(unit)
+    json_unit = infer_time_unit(data, default="ns")
+    out_unit = (args.unit.strip().lower() if args.unit else json_unit.lower().strip())
 
-    # Group samples: N -> [real_time_us]
+    # Group samples: N -> [real_time in out_unit]
     groups = defaultdict(list)
 
     for b in benches:
@@ -82,7 +102,7 @@ def main():
         if not name.startswith(args.prefix + "/"):
             continue
 
-        N = _extract_N(name, args.prefix)
+        N = extract_N(name, args.prefix)
         if N is None:
             continue
 
@@ -90,9 +110,12 @@ def main():
         if rt is None:
             continue
 
-        # Convert whatever unit the JSON is in into microseconds for plotting
-        rt_us = float(rt) * mult_to_us
-        groups[N].append(rt_us)
+        # Use per-entry unit if present, else json_unit
+        entry_unit = b.get("time_unit", "") or json_unit
+        entry_unit = str(entry_unit).strip().lower() if entry_unit else json_unit
+
+        rt_out = convert(float(rt), entry_unit, out_unit)
+        groups[N].append(rt_out)
 
     if not groups:
         raise SystemExit(
@@ -103,24 +126,20 @@ def main():
     Ns = sorted(groups.keys())
     samples = [groups[n] for n in Ns]
 
-    # Ensure output dir exists
-    out_dir = os.path.dirname(args.out_png)
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
+    ensure_dir(args.out_png)
 
     # --- Plot ---
     plt.figure(figsize=(11, 5))
-    # Matplotlib 3.9+: "labels" renamed to "tick_labels"
     plt.boxplot(samples, tick_labels=[str(n) for n in Ns], showfliers=False)
 
     plt.title(f"Latency distribution (per repetition) — {args.prefix}")
     plt.xlabel("Prefill resting orders (N)")
-    plt.ylabel("Time per engine.process() [microseconds]")
+    plt.ylabel(f"Time per operation [{out_unit}]")
     plt.grid(True, axis="y", linestyle="--", alpha=0.3)
 
     if args.logy:
         plt.yscale("log")
-        plt.ylabel("Time per engine.process() [microseconds, log scale]")
+        plt.ylabel(f"Time per operation [{out_unit}, log scale]")
 
     plt.tight_layout()
     plt.savefig(args.out_png, dpi=220)
@@ -129,8 +148,8 @@ def main():
     # --- Summary stats ---
     summary = {
         "prefix": args.prefix,
-        "unit_plotted": "us",
-        "original_time_unit": unit,
+        "unit_plotted": out_unit,
+        "original_time_unit": json_unit,
         "series": [],
     }
 
@@ -148,32 +167,28 @@ def main():
             {
                 "N": int(n),
                 "reps": reps,
-                "min_us": mn,
-                "p50_us": p50,
-                "p90_us": p90,
-                "p99_us": p99,
-                "max_us": mx,
+                f"min_{out_unit}": mn,
+                f"p50_{out_unit}": p50,
+                f"p90_{out_unit}": p90,
+                f"p99_{out_unit}": p99,
+                f"max_{out_unit}": mx,
             }
         )
 
-        print(f"  N={n:5d}  p50={p50:8.3f} us  p90={p90:8.3f} us  p99={p99:8.3f} us  reps={reps}")
+        print(f"  N={n:5d}  p50={p50:10.3f} {out_unit}  p90={p90:10.3f} {out_unit}  p99={p99:10.3f} {out_unit}  reps={reps}")
 
     # Optional: write summary json
     if args.out_summary:
-        out_dir2 = os.path.dirname(args.out_summary)
-        if out_dir2:
-            os.makedirs(out_dir2, exist_ok=True)
+        ensure_dir(args.out_summary)
         with open(args.out_summary, "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2)
         print(f"Wrote: {args.out_summary}")
 
     # Optional: write a README snippet
     if args.out_md:
-        out_dir3 = os.path.dirname(args.out_md)
-        if out_dir3:
-            os.makedirs(out_dir3, exist_ok=True)
+        ensure_dir(args.out_md)
 
-        # choose the "middle" N for headline stats (or N=1000 if present)
+        # pick N=1000 if present, else middle
         pick = None
         for s in summary["series"]:
             if s["N"] == 1000:
@@ -182,19 +197,21 @@ def main():
         if pick is None:
             pick = summary["series"][len(summary["series"]) // 2]
 
+        p50_key = f"p50_{out_unit}"
+        p99_key = f"p99_{out_unit}"
+
         md = []
-        md.append(f"### Latency (Google Benchmark, hot-path)\n")
-        md.append(f"![Latency benchmark]({args.out_png})\n")
+        md.append("### Latency (Google Benchmark)\n\n")
+        md.append(f"![Latency benchmark]({args.out_png})\n\n")
         md.append(
-            f"Headline (N={pick['N']}): **p50={pick['p50_us']:.3f} µs**, "
-            f"**p99={pick['p99_us']:.3f} µs** (reps={pick['reps']}).\n"
+            f"Headline (N={pick['N']}): **p50={pick[p50_key]:.1f} {out_unit}**, "
+            f"**p99={pick[p99_key]:.1f} {out_unit}** (reps={pick['reps']}).\n\n"
         )
-        md.append("\n")
-        md.append("| N (prefill) | reps | p50 (µs) | p90 (µs) | p99 (µs) |\n")
+        md.append(f"| N (prefill) | reps | p50 ({out_unit}) | p90 ({out_unit}) | p99 ({out_unit}) |\n")
         md.append("|---:|---:|---:|---:|---:|\n")
         for s in summary["series"]:
             md.append(
-                f"| {s['N']} | {s['reps']} | {s['p50_us']:.3f} | {s['p90_us']:.3f} | {s['p99_us']:.3f} |\n"
+                f"| {s['N']} | {s['reps']} | {s[f'p50_{out_unit}']:.1f} | {s[f'p90_{out_unit}']:.1f} | {s[f'p99_{out_unit}']:.1f} |\n"
             )
 
         with open(args.out_md, "w", encoding="utf-8") as f:
