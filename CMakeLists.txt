@@ -51,6 +51,7 @@ set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_Declare(
   googletest
   URL https://github.com/google/googletest/archive/refs/tags/v1.15.2.zip
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(googletest)
 
@@ -58,6 +59,7 @@ FetchContent_MakeAvailable(googletest)
 FetchContent_Declare(
   cpp_httplib
   URL https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.18.5.zip
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(cpp_httplib)
 
@@ -67,6 +69,7 @@ set(BENCHMARK_ENABLE_GTEST_TESTS OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
   benchmark
   URL https://github.com/google/benchmark/archive/refs/tags/v1.9.4.zip
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(benchmark)
 
@@ -126,8 +129,24 @@ include(GoogleTest)
 gtest_discover_tests(msim_tests)
 
 # ---------------- Benchmarks ----------------
+# Some people accidentally create test/bench_engine.cpp instead of tests/bench_engine.cpp
+set(BENCH_SRC "")
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/bench_engine.cpp")
+  set(BENCH_SRC "${CMAKE_CURRENT_SOURCE_DIR}/tests/bench_engine.cpp")
+elseif (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test/bench_engine.cpp")
+  set(BENCH_SRC "${CMAKE_CURRENT_SOURCE_DIR}/test/bench_engine.cpp")
+else()
+  message(FATAL_ERROR
+    "Benchmark source not found. Expected either:\n"
+    "  tests/bench_engine.cpp\n"
+    "or\n"
+    "  test/bench_engine.cpp\n"
+    "Make sure the file exists AND is committed to the repo."
+  )
+endif()
+
 add_executable(msim_bench
-  tests/bench_engine.cpp
+  ${BENCH_SRC}
 )
 target_link_libraries(msim_bench PRIVATE msim benchmark::benchmark benchmark::benchmark_main)
 msim_set_warnings(msim_bench)
