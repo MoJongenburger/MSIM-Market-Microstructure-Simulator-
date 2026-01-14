@@ -17,8 +17,7 @@
 #include "msim/types.hpp"
 
 // ---------------- Benchmark-only allocation counter ----------------
-// This only impacts the benchmark executable, not msim lib/tests.
-// Counting only happens inside alloc::Scope.
+// Counts allocations only within alloc::Scope.
 namespace alloc {
 inline std::atomic<std::uint64_t> g_allocs{0};
 inline thread_local bool g_counting = false;
@@ -54,7 +53,6 @@ namespace {
 
 msim::RulesConfig bench_rules_cfg() {
   msim::RulesConfig cfg{};
-  // Make benchmark results stable (avoid “defaults changed” surprises)
   cfg.tick_size_ticks = 1;
   cfg.lot_size = 1;
   cfg.min_qty = 1;
@@ -77,7 +75,6 @@ static msim::Order make_limit(msim::OrderId id,
   o.price = px;
   o.qty = qty;
 
-  // If your Order has mkt_style, keep it deterministic (compile-time detected).
   if constexpr (requires(msim::Order x) { x.mkt_style = msim::MarketStyle::PureMarket; }) {
     o.mkt_style = msim::MarketStyle::PureMarket;
   }
@@ -106,10 +103,9 @@ static msim::Order make_market(msim::OrderId id,
 }
 
 msim::MatchingEngine make_engine_prefilled(std::int32_t n_resting) {
-  auto cfg = bench_rules_cfg();
-  msim::MatchingEngine eng{msim::RuleSet(cfg)};
+  msim::MatchingEngine eng{msim::RuleSet(bench_rules_cfg())};
 
-  constexpr msim::Price mid = 10000; // ticks
+  constexpr msim::Price mid = 10000;
   constexpr int levels = 10;
   constexpr msim::Qty maker_qty = 1'000'000;
 
@@ -161,7 +157,14 @@ static void prefill_bids_levels(msim::MatchingEngine& eng,
   }
 }
 
-// ---------------- Existing benchmark (kept) ----------------
+static inline void set_allocs_per_op(benchmark::State& state) {
+  const double iters = static_cast<double>(state.iterations());
+  const double a = static_cast<double>(alloc::total());
+  state.counters["allocs/op"] = a / iters;
+}
+
+// ---------------- Benchmarks ----------------
+
 static void BM_ProcessMarketOrder(benchmark::State& state) {
   const int N = static_cast<int>(state.range(0));
   constexpr std::uint64_t reset_every = 200'000;
@@ -195,8 +198,7 @@ static void BM_ProcessMarketOrder(benchmark::State& state) {
     ++iter;
   }
 
-  const double iters = static_cast<double>(state.iterations());
-  state.counters["allocs/op"] = alloc::total() / iters;
+  set_allocs_per_op(state);
   state.SetComplexityN(N);
 }
 
@@ -208,9 +210,6 @@ BENCHMARK(BM_ProcessMarketOrder)
   ->ReportAggregatesOnly(false)
   ->Complexity();
 
-// ---------------- New benchmarks ----------------
-
-// 1) Reject path: invalid qty (rules + validation overhead)
 static void BM_ProcessReject_InvalidQty(benchmark::State& state) {
   auto eng = msim::MatchingEngine(msim::RuleSet(bench_rules_cfg()));
   std::uint64_t oid = 1;
@@ -226,19 +225,17 @@ static void BM_ProcessReject_InvalidQty(benchmark::State& state) {
     o.type = msim::OrderType::Limit;
     o.tif = msim::TimeInForce::GTC;
     o.price = 100;
-    o.qty = 0; // invalid by cfg.min_qty = 1
+    o.qty = 0;
 
     alloc::Scope s;
     auto res = eng.process(o);
     benchmark::DoNotOptimize(res.status);
   }
 
-  const double iters = static_cast<double>(state.iterations());
-  state.counters["allocs/op"] = alloc::total() / iters;
+  set_allocs_per_op(state);
 }
 BENCHMARK(BM_ProcessReject_InvalidQty)->Unit(benchmark::kMicrosecond);
 
-// 2) Sweep across K levels (measures deeper matching work)
 static void BM_ProcessMarket_SweepKLevels(benchmark::State& state) {
   const int K = static_cast<int>(state.range(0));
   alloc::reset();
@@ -250,7 +247,6 @@ static void BM_ProcessMarket_SweepKLevels(benchmark::State& state) {
     auto eng = msim::MatchingEngine(msim::RuleSet(bench_rules_cfg()));
     msim::OrderId local = next_id;
 
-    // K levels, qty=1 each => market buy qty=K sweeps K trades
     prefill_asks_levels(eng, 100, 1, K, 1, static_cast<msim::OwnerId>(1), local, 0);
     state.ResumeTiming();
 
@@ -267,8 +263,7 @@ static void BM_ProcessMarket_SweepKLevels(benchmark::State& state) {
     next_id = local + 2;
   }
 
-  const double iters = static_cast<double>(state.iterations());
-  state.counters["allocs/op"] = alloc::total() / iters;
+  set_allocs_per_op(state);
   state.SetComplexityN(K);
 }
 BENCHMARK(BM_ProcessMarket_SweepKLevels)
@@ -276,7 +271,6 @@ BENCHMARK(BM_ProcessMarket_SweepKLevels)
   ->Complexity()
   ->Unit(benchmark::kMicrosecond);
 
-// 3) O(1) cancel
 static void BM_BookCancel_O1(benchmark::State& state) {
   auto eng = msim::MatchingEngine(msim::RuleSet(bench_rules_cfg()));
   msim::OrderId next_id = 1;
@@ -292,15 +286,16 @@ static void BM_BookCancel_O1(benchmark::State& state) {
 
     alloc::Scope s;
     const bool ok = eng.book_mut().cancel(oid);
-    benchmark::DoNotOptimize(ok);
+
+    // Avoid deprecated DoNotOptimize(const bool&)
+    const int ok_i = ok ? 1 : 0;
+    benchmark::DoNotOptimize(ok_i);
   }
 
-  const double iters = static_cast<double>(state.iterations());
-  state.counters["allocs/op"] = alloc::total() / iters;
+  set_allocs_per_op(state);
 }
 BENCHMARK(BM_BookCancel_O1)->Unit(benchmark::kMicrosecond);
 
-// 4) O(1) modify (reduce-only)
 static void BM_BookModifyQty_O1(benchmark::State& state) {
   auto eng = msim::MatchingEngine(msim::RuleSet(bench_rules_cfg()));
   msim::OrderId next_id = 1;
@@ -316,26 +311,24 @@ static void BM_BookModifyQty_O1(benchmark::State& state) {
 
     alloc::Scope s;
     const bool ok = eng.book_mut().modify_qty(oid, 50);
-    benchmark::DoNotOptimize(ok);
 
-    // cleanup not measured
+    const int ok_i = ok ? 1 : 0;
+    benchmark::DoNotOptimize(ok_i);
+
     state.PauseTiming();
     (void)eng.book_mut().cancel(oid);
     state.ResumeTiming();
   }
 
-  const double iters = static_cast<double>(state.iterations());
-  state.counters["allocs/op"] = alloc::total() / iters;
+  set_allocs_per_op(state);
 }
 BENCHMARK(BM_BookModifyQty_O1)->Unit(benchmark::kMicrosecond);
 
-// 5) Depth snapshot (cost impacts ladder/UI)
 static void BM_BookDepth_TopN(benchmark::State& state) {
   const int N = static_cast<int>(state.range(0));
   auto eng = msim::MatchingEngine(msim::RuleSet(bench_rules_cfg()));
 
   msim::OrderId next_id = 1;
-  // Build a “fat” book so depth has real work.
   prefill_bids_levels(eng, 2000, 1, 2000, 10, static_cast<msim::OwnerId>(1), next_id, 0);
   prefill_asks_levels(eng, 2001, 1, 2000, 10, static_cast<msim::OwnerId>(2), next_id, 0);
 
@@ -349,8 +342,7 @@ static void BM_BookDepth_TopN(benchmark::State& state) {
     benchmark::DoNotOptimize(asks);
   }
 
-  const double iters = static_cast<double>(state.iterations());
-  state.counters["allocs/op"] = alloc::total() / iters;
+  set_allocs_per_op(state);
   state.SetComplexityN(N);
 }
 BENCHMARK(BM_BookDepth_TopN)
