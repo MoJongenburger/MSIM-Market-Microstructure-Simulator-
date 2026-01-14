@@ -156,12 +156,23 @@ void set_allocs_per_op(benchmark::State& state) {
       static_cast<double>(alloc::scoped_total()) / iters;
 }
 
+// Cache eviction helper for COLD benchmark.
+// We touch a large buffer to kick the engine/book out of caches.
+static void clobber_cache(std::vector<std::uint64_t>& buf) {
+  constexpr std::size_t stride = 16; // 16*8=128B steps
+  for (std::size_t i = 0; i < buf.size(); i += stride) {
+    buf[i] += 1u;
+  }
+  benchmark::DoNotOptimize(buf.data());
+  benchmark::ClobberMemory();
+}
+
 // =====================
 // Benchmarks
 // =====================
 
-// 1) Hot-path market order processing (small qty, hits top of book)
-static void BM_ProcessMarketOrder(benchmark::State& state) {
+// 1a) HOT-path market order processing (small qty, hits top of book)
+static void BM_ProcessMarketOrder_Hot(benchmark::State& state) {
   const std::int32_t N = static_cast<std::int32_t>(state.range(0));
   constexpr std::uint64_t reset_every = 200'000;
 
@@ -173,6 +184,7 @@ static void BM_ProcessMarketOrder(benchmark::State& state) {
   alloc::reset();
 
   for (auto _ : state) {
+    (void)_;
     if ((iter % reset_every) == 0 && iter != 0) {
       state.PauseTiming();
       eng = make_engine_prefilled(N);
@@ -189,7 +201,7 @@ static void BM_ProcessMarketOrder(benchmark::State& state) {
     alloc::Scope s;
     auto res = eng.process(o);
 
-    benchmark::DoNotOptimize(res.filled_qty);
+    benchmark::DoNotOptimize(static_cast<int>(res.filled_qty));
     benchmark::ClobberMemory();
     ++iter;
   }
@@ -198,7 +210,62 @@ static void BM_ProcessMarketOrder(benchmark::State& state) {
   state.SetComplexityN(N);
 }
 
-BENCHMARK(BM_ProcessMarketOrder)
+BENCHMARK(BM_ProcessMarketOrder_Hot)
+  ->Unit(benchmark::kNanosecond)
+  ->RangeMultiplier(10)
+  ->Range(100, 10000)
+  ->Repetitions(25)
+  ->Complexity();
+
+
+// 1b) COLD-path market order processing (cache-evicted before each timed op)
+static void BM_ProcessMarketOrder_Cold(benchmark::State& state) {
+  const std::int32_t N = static_cast<std::int32_t>(state.range(0));
+  constexpr std::uint64_t reset_every = 200'000;
+
+  auto eng = make_engine_prefilled(N);
+
+  // 32 MiB cache trash buffer
+  std::vector<std::uint64_t> trash((32u * 1024u * 1024u) / sizeof(std::uint64_t), 0u);
+
+  std::uint64_t taker_id = 30'000'000;
+  std::uint64_t iter = 0;
+
+  alloc::reset();
+
+  for (auto _ : state) {
+    (void)_;
+    if ((iter % reset_every) == 0 && iter != 0) {
+      state.PauseTiming();
+      eng = make_engine_prefilled(N);
+      state.ResumeTiming();
+    }
+
+    // Evict caches outside timing (so we only measure engine.process latency).
+    state.PauseTiming();
+    clobber_cache(trash);
+    state.ResumeTiming();
+
+    const msim::Side side = ((iter & 1ull) == 0ull) ? msim::Side::Buy : msim::Side::Sell;
+    msim::Order o = make_market(static_cast<msim::OrderId>(taker_id++),
+                                static_cast<msim::OwnerId>(999),
+                                static_cast<msim::Ts>(iter),
+                                side,
+                                1);
+
+    alloc::Scope s;
+    auto res = eng.process(o);
+
+    benchmark::DoNotOptimize(static_cast<int>(res.filled_qty));
+    benchmark::ClobberMemory();
+    ++iter;
+  }
+
+  set_allocs_per_op(state);
+  state.SetComplexityN(N);
+}
+
+BENCHMARK(BM_ProcessMarketOrder_Cold)
   ->Unit(benchmark::kNanosecond)
   ->RangeMultiplier(10)
   ->Range(100, 10000)
@@ -216,6 +283,7 @@ static void BM_ProcessReject_InvalidQty(benchmark::State& state) {
   alloc::reset();
 
   for (auto _ : state) {
+    (void)_;
     msim::Order o = make_limit(static_cast<msim::OrderId>(oid++),
                               static_cast<msim::OwnerId>(999),
                               static_cast<msim::Ts>(iter++),
@@ -251,6 +319,7 @@ static void BM_ProcessMarket_SweepKLevels(benchmark::State& state) {
   alloc::reset();
 
   for (auto _ : state) {
+    (void)_;
     // approximate sweep: qty grows with K
     const msim::Qty sweep_qty = static_cast<msim::Qty>(K);
 
@@ -262,7 +331,7 @@ static void BM_ProcessMarket_SweepKLevels(benchmark::State& state) {
 
     alloc::Scope s;
     auto res = eng.process(o);
-    benchmark::DoNotOptimize(res.filled_qty);
+    benchmark::DoNotOptimize(static_cast<int>(res.filled_qty));
   }
 
   set_allocs_per_op(state);
@@ -285,6 +354,7 @@ static void BM_BookCancel_O1(benchmark::State& state) {
   alloc::reset();
 
   for (auto _ : state) {
+    (void)_;
     state.PauseTiming();
     const msim::OrderId oid = next_id++;
     (void)eng.book_mut().add_resting_limit(
@@ -294,7 +364,6 @@ static void BM_BookCancel_O1(benchmark::State& state) {
     alloc::Scope s;
     const bool ok = eng.book_mut().cancel(oid);
 
-    // Avoid deprecated const-ref DoNotOptimize: use a non-const lvalue
     int ok_i = ok ? 1 : 0;
     benchmark::DoNotOptimize(ok_i);
   }
@@ -315,6 +384,7 @@ static void BM_BookModifyQty_O1(benchmark::State& state) {
   alloc::reset();
 
   for (auto _ : state) {
+    (void)_;
     state.PauseTiming();
     const msim::OrderId oid = next_id++;
     (void)eng.book_mut().add_resting_limit(
@@ -348,6 +418,7 @@ static void BM_BookDepth_TopN(benchmark::State& state) {
   alloc::reset();
 
   for (auto _ : state) {
+    (void)_;
     alloc::Scope s;
     auto bids = eng.book().depth(msim::Side::Buy, topN);
     auto asks = eng.book().depth(msim::Side::Sell, topN);
