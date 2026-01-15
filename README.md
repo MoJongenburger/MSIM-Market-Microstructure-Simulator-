@@ -2,11 +2,11 @@
 <!-- Badges -->
 ![C++](https://img.shields.io/badge/C%2B%2B-20-blue)
 ![CMake](https://img.shields.io/badge/CMake-3.20%2B-064F8C)
-![Build](https://github.com/<OWNER>/<REPO>/actions/workflows/<WORKFLOW_FILE>.yml/badge.svg)
+![Build](https://github.com/MoJongenburger/MSIM-Market-Microstructure-Simulator-/actions/workflows/<WORKFLOW_FILE>.yml/badge.svg)
 ![Latency](https://img.shields.io/badge/Latency-p50%2090.7ns-brightgreen)
 ![Tail](https://img.shields.io/badge/Tail%20p99-94.3ns-brightgreen)
 ![Throughput](https://img.shields.io/badge/Throughput-~10.5M%20ops%2Fs-blueviolet)
-![License](https://img.shields.io/github/license/<OWNER>/<REPO>)
+![License](https://img.shields.io/github/license/MoJongenburger/MSIM-Market-Microstructure-Simulator-)
 
 MSIM is a deterministic, event-driven **limit order book + matching engine** written in modern **C++20**, built as a **microstructure research sandbox** for studying execution mechanics, venue rules, and agent interaction.
 
