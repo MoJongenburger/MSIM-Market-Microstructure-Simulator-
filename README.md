@@ -2,8 +2,8 @@
 <!-- Badges -->
 ![C++](https://img.shields.io/badge/C%2B%2B-20-blue)
 ![CMake](https://img.shields.io/badge/CMake-3.20%2B-064F8C)
-![Build](https://github.com/MoJongenburger/MSIM-Market-Microstructure-Simulator-/actions/workflows/<WORKFLOW_FILE>.yml/badge.svg)
-![Latency](https://img.shields.io/badge/Latency-p50%2090.7ns-brightgreen)
+[![CI](https://github.com/MoJongenburger/MSIM-Market-Microstructure-Simulator-/actions/workflows/ci.yml/badge.svg)](https://github.com/MoJongenburger/MSIM-Market-Microstructure-Simulator-/actions/workflows/ci.yml)
+![Latency](https://img.shields.io/badge/Latency%p50-2090.7ns-brightgreen)
 ![Tail](https://img.shields.io/badge/Tail%20p99-94.3ns-brightgreen)
 ![Throughput](https://img.shields.io/badge/Throughput-~10.5M%20ops%2Fs-blueviolet)
 ![License](https://img.shields.io/github/license/MoJongenburger/MSIM-Market-Microstructure-Simulator-)
