@@ -1,4 +1,12 @@
 # MSIM — Market Microstructure Simulator (C++20)
+<!-- Badges -->
+![C++](https://img.shields.io/badge/C%2B%2B-20-blue)
+![CMake](https://img.shields.io/badge/CMake-3.20%2B-064F8C)
+![Build](https://github.com/<OWNER>/<REPO>/actions/workflows/<WORKFLOW_FILE>.yml/badge.svg)
+![Latency](https://img.shields.io/badge/Latency-p50%2090.7ns-brightgreen)
+![Tail](https://img.shields.io/badge/Tail%20p99-94.3ns-brightgreen)
+![Throughput](https://img.shields.io/badge/Throughput-~10.5M%20ops%2Fs-blueviolet)
+![License](https://img.shields.io/github/license/<OWNER>/<REPO>)
 
 MSIM is a deterministic, event-driven **limit order book + matching engine** written in modern **C++20**, built as a **microstructure research sandbox** for studying execution mechanics, venue rules, and agent interaction.
 
@@ -272,9 +280,27 @@ docs/                 # generated benchmark plots + summaries
 
 ## Roadmap (next)
 
-* Live candlestick chart + multiple time windows (1 minute / 5 minutes / 15 minutes / 1 hour / day)
-* WebSocket streaming (push updates instead of polling)
-* User orders: track open orders, fills, and per-user PnL in the UI
-* Latency model + message rate limits
-* Stop / stop-loss / stop-limit orders
-* Iceberg orders
+1. **Zero-allocation depth snapshots (L2)**
+
+* Add `OrderBook::depth_into(side, levels, out_vec)` so the gateway reuses the same vector instead of allocating every poll.
+* Files: `include/msim/book.hpp`, `src/book.cpp`, `src/gateway_main.cpp`, `web/app.js`
+
+2. **Pre-reserve + stabilize hash map behavior**
+
+* `loc_` in `OrderBook` and `order_meta_/accounts_` in `World`: call `reserve()` + set `max_load_factor()` to reduce rehash jitter.
+* Files: `src/book.cpp` (where loc_ grows) / constructor area, `src/world.cpp`
+
+3. **Replace `std::map` levels with cache-friendlier levels**
+
+* Switch price levels to a `flat_map` (or sorted `std::vector` of levels) for fewer cache misses.
+* Files: `include/msim/book.hpp`, `src/book.cpp`
+
+4. **Replace per-level `std::list<Order>` with a contiguous FIFO**
+
+* E.g. an intrusive queue or deque/ring structure (still FIFO per price).
+* Files: `include/msim/book.hpp`, `src/book.cpp`
+
+5. **Benchmark methodology hardening**
+
+* Pin benchmark thread/core (optional), print CPU info + compiler flags, store in `docs/`.
+* Files: `tests/bench_engine.cpp`, new `docs/benchmark_methodology.md`
