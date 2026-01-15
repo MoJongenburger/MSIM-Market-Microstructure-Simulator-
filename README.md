@@ -32,7 +32,7 @@ Per-N tail stats for the same benchmark (from `plot_latency.py`):
 <img width="2420" height="1100" alt="latency_benchmark" src="https://github.com/user-attachments/assets/97da4718-5376-45eb-951a-5948072e6e0c" />
 > Interpretation: this is a tight “hot path” benchmark for the matching call with a warmed order book. It is intended to provide objective, reproducible latency evidence (not a full end-to-end trading stack measurement).
 
-
+### Extra plot
 To complement matching latency, the most meaningful second plot is **market-data extraction latency**: L2 depth snapshot scaling (Top-N). This demonstrates that MSIM can publish depth quickly and predictably (important for UIs and downstream agents).
 
 <img width="2200" height="1000" alt="latency_box_BM_BookDepth_TopN" src="https://github.com/user-attachments/assets/cac89335-77fb-40c8-a8c5-bb3625ed802b" />
