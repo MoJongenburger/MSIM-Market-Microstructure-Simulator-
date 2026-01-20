@@ -27,7 +27,7 @@ MSIM ships with a benchmark suite (Google Benchmark) plus plotting tools that ge
 
 market order processing on a warm book:
 
-* `BM_ProcessMarketOrder` @ **N=10,000** resting orders: **p50 = 90.7 ns**, **p99 = 94.3 ns** (reps=25)
+* `BM_ProcessMarketOrder` @ **N=10,000** resting orders: **p50 = 90.7 ns**, **p99 = 94.3 ns** (reps=29)
 
 Per-N tail stats for the same benchmark (from `plot_latency.py`):
 
