@@ -1,142 +1,139 @@
 #pragma once
-// =============================================================================
-// msim/agents/momentum_agent.hpp
+// ============================================================
+// include/msim/agents/momentum_agent.hpp
 //
-// Momentum Agent — trend-following trader that submits orders in the direction
-// of recent price movement, modelling positive-feedback order flow.
+// MACD trend-following trader.
 //
-// Theory (Bouchaud et al. 2009 — order flow autocorrelation):
-//   Empirical studies of LOBs show strong positive autocorrelation in the
-//   sign of order flow at short horizons (seconds to minutes), driven partly
-//   by trend-following participants.  This agent models that behaviour:
+//   signal_t = EMA_fast(mid, α_f) − EMA_slow(mid, α_s)
+//   α = 2 / (N + 1)
 //
-//   Signal: s_t = EMA_fast(mid, α_f) − EMA_slow(mid, α_s)
+// Buys  when signal >  entry_band.
+// Sells when signal < −entry_band.
+// Flattens when |signal| < exit_band.
+// Position capped at ±max_position.
 //
-//   where EMA_fast decays faster (shorter lookback) and EMA_slow decays slower.
-//   This is a discrete-time MACD (Moving Average Convergence Divergence) signal
-//   which is standard in systematic trading literature.
-//
-//   Trading rule:
-//     s_t > +entry_band  → submit market buy  (uptrend detected)
-//     s_t < −entry_band  → submit market sell (downtrend detected)
-//     |s_t| < exit_band  → close existing position with market order
-//     otherwise          → hold
-//
-// Position tracking:
-//   The agent tracks net inventory and will not add to a position beyond
-//   max_position lots (risk limit).  It uses market orders (IOC) for speed,
-//   consistent with empirical evidence that momentum traders prefer immediacy.
-// =============================================================================
+// Implements msim::IAgent exactly.
+// ============================================================
 
-#include <cstdint>
-#include <optional>
-#include <deque>
+#include <algorithm>
 #include <cmath>
-#include "../types.hpp"
+#include <vector>
+
+#include "msim/world.hpp"
+#include "msim/order.hpp"
+#include "msim/types.hpp"
 
 namespace msim::agents {
 
 struct MomentumConfig {
-    // EMA parameters (α = 2/(N+1) for an N-period EMA)
-    double alpha_fast    = 2.0 / (5.0  + 1.0);  ///< Fast EMA decay (≈ 5-step)
-    double alpha_slow    = 2.0 / (20.0 + 1.0);  ///< Slow EMA decay (≈ 20-step)
-
-    // Signal thresholds (in ticks)
-    double entry_band    = 0.5;   ///< Signal magnitude to open a position
-    double exit_band     = 0.1;   ///< Signal magnitude to close a position
-
-    // Risk limits
-    Qty    lot_size      = 1;     ///< Order size per signal
-    Qty    max_position  = 10;    ///< Maximum net inventory (longs or shorts)
-
-    // Minimum steps before trading (EMA warm-up period)
-    int    warmup_steps  = 20;
+  double alpha_fast   = 2.0 / 6.0;   // ≈ 5-step EMA
+  double alpha_slow   = 2.0 / 21.0;  // ≈ 20-step EMA
+  double entry_band   = 0.30;   // signal magnitude (ticks) to open
+  double exit_band    = 0.05;   // signal magnitude (ticks) to flatten
+  Qty    lot_size     = 3;      // lots per signal
+  Qty    max_position = 15;     // absolute inventory cap
+  int    warmup_steps = 20;     // steps before any trading
 };
 
-class MomentumAgent {
+class MomentumAgent final : public IAgent {
 public:
-    explicit MomentumAgent(uint64_t /*seed*/, MomentumConfig cfg = {})
-        : cfg_(cfg)
-        , ema_fast_(0.0), ema_slow_(0.0)
-        , step_(0)
-        , position_(0)
-        , initialised_(false)
-    {}
+  MomentumAgent(OwnerId owner_id, MomentumConfig cfg = {})
+    : owner_(owner_id), cfg_(cfg) {}
 
-    struct Order {
-        Side        side;
-        OrderType   type  = OrderType::MARKET;
-        Price       price = 0;
-        Qty         qty;
-        TimeInForce tif   = TimeInForce::IOC;
-    };
+  // ── IAgent ───────────────────────────────────────────────────────────────
+  OwnerId owner() const noexcept override { return owner_; }
 
-    template <typename MarketView>
-    std::optional<Order> act(const MarketView& view, Ts /*ts*/) {
-        if (!view.has_quote()) return std::nullopt;
+  // No RNG — reset state deterministically on re-seed
+  void seed(uint64_t /*s*/) override {
+    ema_fast_    = ema_slow_ = 0.0;
+    step_        = 0;
+    position_    = 0;
+    initialised_ = false;
+  }
 
-        const double mid = static_cast<double>(view.mid);
-
-        // ── Initialise EMAs on first observation ──────────────────────────────
-        if (!initialised_) {
-            ema_fast_ = mid;
-            ema_slow_ = mid;
-            initialised_ = true;
-        }
-
-        // ── Update exponential moving averages ────────────────────────────────
-        // EMA_t = α·mid_t + (1−α)·EMA_{t−1}
-        ema_fast_ = cfg_.alpha_fast * mid + (1.0 - cfg_.alpha_fast) * ema_fast_;
-        ema_slow_ = cfg_.alpha_slow * mid + (1.0 - cfg_.alpha_slow) * ema_slow_;
-        ++step_;
-
-        if (step_ < cfg_.warmup_steps) return std::nullopt;  // warm-up period
-
-        // ── Compute MACD signal ───────────────────────────────────────────────
-        const double signal = ema_fast_ - ema_slow_;
-
-        // ── Position exit (flatten) ───────────────────────────────────────────
-        if (std::abs(signal) < cfg_.exit_band && position_ != 0) {
-            const Side   exit_side = (position_ > 0) ? Side::SELL : Side::BUY;
-            const Qty    exit_qty  = std::abs(position_);
-            position_ = 0;
-            return Order{exit_side, OrderType::MARKET, 0, exit_qty, TimeInForce::IOC};
-        }
-
-        // ── Position entry ────────────────────────────────────────────────────
-        if (signal > cfg_.entry_band && position_ < cfg_.max_position) {
-            const Qty add = std::min(cfg_.lot_size, cfg_.max_position - position_);
-            if (add <= 0) return std::nullopt;
-            position_ += add;
-            return Order{Side::BUY, OrderType::MARKET, 0, add, TimeInForce::IOC};
-        }
-        if (signal < -cfg_.entry_band && position_ > -cfg_.max_position) {
-            const Qty add = std::min(cfg_.lot_size, cfg_.max_position + position_);
-            if (add <= 0) return std::nullopt;
-            position_ -= add;
-            return Order{Side::SELL, OrderType::MARKET, 0, add, TimeInForce::IOC};
-        }
-
-        return std::nullopt;
+  void step(Ts ts,
+            const MarketView&  view,
+            const AgentState&  /*self*/,
+            std::vector<Action>& out) override
+  {
+    // Compute current mid (prefer view.mid; fall back to (bid+ask)/2)
+    double mid = 0.0;
+    if (view.mid) {
+      mid = static_cast<double>(*view.mid);
+    } else if (view.best_bid && view.best_ask) {
+      mid = static_cast<double>(*view.best_bid + *view.best_ask) / 2.0;
+    } else {
+      return;
     }
 
-    // Diagnostics
-    double signal()   const { return ema_fast_ - ema_slow_; }
-    Qty    position() const { return position_; }
-    double ema_fast() const { return ema_fast_; }
-    double ema_slow() const { return ema_slow_; }
-
-    void reset() {
-        ema_fast_ = ema_slow_ = 0.0;
-        step_ = 0; position_ = 0; initialised_ = false;
+    // Initialise EMAs on first call
+    if (!initialised_) {
+      ema_fast_ = ema_slow_ = mid;
+      initialised_ = true;
     }
+
+    // EMA update: EMA_t = α·mid + (1−α)·EMA_{t−1}
+    ema_fast_ = cfg_.alpha_fast * mid + (1.0 - cfg_.alpha_fast) * ema_fast_;
+    ema_slow_ = cfg_.alpha_slow * mid + (1.0 - cfg_.alpha_slow) * ema_slow_;
+    ++step_;
+
+    if (step_ < cfg_.warmup_steps) return;
+
+    const double signal = ema_fast_ - ema_slow_;
+
+    // Flatten existing position when signal decays
+    if (std::abs(signal) < cfg_.exit_band && position_ != 0) {
+      const Side exit_side = (position_ > 0) ? Side::Sell : Side::Buy;
+      const Qty  exit_qty  = std::abs(position_);
+      out.push_back(Action::submit(make_order(ts, exit_side, exit_qty)));
+      position_ = 0;
+      return;
+    }
+
+    // Open / add to long
+    if (signal > cfg_.entry_band && position_ < cfg_.max_position) {
+      const Qty add = std::min(cfg_.lot_size, cfg_.max_position - position_);
+      if (add > 0) {
+        out.push_back(Action::submit(make_order(ts, Side::Buy, add)));
+        position_ += add;
+      }
+    }
+    // Open / add to short
+    else if (signal < -cfg_.entry_band && position_ > -cfg_.max_position) {
+      const Qty add = std::min(cfg_.lot_size, cfg_.max_position + position_);
+      if (add > 0) {
+        out.push_back(Action::submit(make_order(ts, Side::Sell, add)));
+        position_ -= add;
+      }
+    }
+  }
+
+  double signal()   const noexcept { return ema_fast_ - ema_slow_; }
+  Qty    position() const noexcept { return position_; }
 
 private:
-    MomentumConfig cfg_;
-    double  ema_fast_, ema_slow_;
-    int     step_;
-    Qty     position_;
-    bool    initialised_;
+  Order make_order(Ts ts, Side side, Qty qty) const {
+    Order o{};
+    o.id        = (owner_ << 24) | (counter_++ & 0xFF'FFFFull);
+    o.owner     = owner_;
+    o.side      = side;
+    o.type      = OrderType::Market;
+    o.price     = 0;
+    o.qty       = qty;
+    o.ts        = ts;
+    o.tif       = TimeInForce::IOC;
+    o.mkt_style = MarketStyle::PureMarket;
+    return o;
+  }
+
+  OwnerId        owner_;
+  MomentumConfig cfg_;
+  double         ema_fast_    = 0.0;
+  double         ema_slow_    = 0.0;
+  int            step_        = 0;
+  Qty            position_    = 0;
+  bool           initialised_ = false;
+  mutable uint64_t counter_  = 0;
 };
 
 } // namespace msim::agents
