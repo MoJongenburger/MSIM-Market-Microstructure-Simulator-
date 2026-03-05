@@ -385,7 +385,7 @@ docs/                           # generated benchmark plots + summaries
 ## Roadmap (next)
 
 1. **Zero-allocation depth snapshots (L2)**
-   Add `OrderBook::depth_into(side, levels, out_vec)` so the gateway reuses the same vector instead of allocating every poll.
+   We will add `OrderBook::depth_into(side, levels, out_vec)` so the gateway reuses the same vector instead of allocating every poll.
    Files: `include/msim/book.hpp`, `src/book.cpp`, `src/gateway_main.cpp`, `web/app.js`
 
 2. **Pre-reserve + stabilize hash map behaviour**
