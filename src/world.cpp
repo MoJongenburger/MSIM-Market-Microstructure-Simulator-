@@ -1,11 +1,9 @@
 // ============================================================
 // src/world.cpp  — COMPLETE REPLACEMENT
-//
-// Every change marked NEW.  Original logic untouched otherwise.
 // ============================================================
 
 #include "msim/world.hpp"
-#include "msim/agents/fundamental_value_agent.hpp"  // NEW: FV signal logging
+#include "msim/agents/fundamental_value_agent.hpp"  // FV signal logging
 
 #include <algorithm>
 #include <cmath>
@@ -23,11 +21,8 @@ uint64_t World::splitmix64(uint64_t& x) noexcept {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// process_action  (NEW helper — extracted from the inner loop)
-//
-// Handles one Submit / Cancel / ModifyQty, applies ledger updates, and
-// records every resulting trade into the StylizedFactsMeasurer.
-// Called from both the zero-latency and the latency-sorted path.
+// process_action — handles one Submit / Cancel / ModifyQty
+// Records every trade to WorldResult and to the StylizedFactsMeasurer.
 // ─────────────────────────────────────────────────────────────────────────────
 void World::process_action(Ts ts,
                             OwnerId /*oid*/,
@@ -39,7 +34,6 @@ void World::process_action(Ts ts,
     Order o = act.order;
     o.ts = ts;
 
-    // Record meta BEFORE processing (taker side must be known)
     order_meta_[o.id] = OrderMeta{o.owner, o.side};
 
     auto res = engine_.process(o);
@@ -53,8 +47,6 @@ void World::process_action(Ts ts,
       const auto mid2 = midprice(bb2, ba2);
       apply_trades_to_accounts(ts, res.trades, order_meta_, accounts_, mid2);
 
-      // NEW: record to stylized facts measurer
-      // Aggressor = taker; look up side from order_meta_.
       const Price cur_mid = mid2 ? *mid2 : Price{0};
       for (const auto& tr : res.trades) {
         Side aggressor = Side::Buy;
@@ -66,9 +58,10 @@ void World::process_action(Ts ts,
     }
 
   } else if (act.type == ActionType::Cancel) {
-    if (!engine_.book_mut().cancel(act.id)) out.cancel_failures++;
+    if (!engine_.book_mut().cancel(act.id))
+      out.cancel_failures++;
 
-  } else { // ModifyQty
+  } else {
     if (!engine_.book_mut().modify_qty(act.id, act.new_qty))
       out.modify_failures++;
   }
@@ -86,18 +79,14 @@ WorldResult World::run(uint64_t seed,
   const Ts t_end = static_cast<Ts>(
       std::llround(horizon_seconds * 1'000'000'000.0));
 
-  // ── 1. Seed agents — unchanged ────────────────────────────────────────────
+  // ── 1. Seed agents (original logic) ───────────────────────────────────────
   uint64_t sm = seed;
   for (std::size_t i = 0; i < agents_.size(); ++i) {
     const uint64_t s = splitmix64(sm) ^ (static_cast<uint64_t>(i) + 1ull);
     agents_[i]->seed(s);
   }
 
-  // ── 2. NEW: Build one LatencySampler per agent ────────────────────────────
-  // Sampler seeds are derived from (seed XOR fixed constant), iterated, so
-  // they are completely independent of the agent RNG streams above.
-  // If latency is disabled, samplers are built with FIXED 0ns — they are
-  // never called in that case, so there is zero runtime cost.
+  // ── 2. Build one LatencySampler per agent ─────────────────────────────────
   latency_samplers_.clear();
   latency_samplers_.reserve(agents_.size());
   {
@@ -105,7 +94,7 @@ WorldResult World::run(uint64_t seed,
     for (std::size_t i = 0; i < agents_.size(); ++i) {
       const uint64_t lat_seed = splitmix64(lat_sm);
 
-      LatencyDistConfig ldc{LatencyDistType::FIXED, 0.0}; // zero-latency default
+      LatencyDistConfig ldc{LatencyDistType::FIXED, 0.0};
       if (cfg.latency_enabled && i < cfg.latency_configs.size())
         ldc = cfg.latency_configs[i];
 
@@ -113,18 +102,16 @@ WorldResult World::run(uint64_t seed,
     }
   }
 
-  // ── 3. NEW: Stylized facts measurer ───────────────────────────────────────
-  StylizedFactsMeasurer sfm(/*max_lag=*/20, /*n_impact_bins=*/10);
+  // ── 3. Stylized facts measurer ────────────────────────────────────────────
+  StylizedFactsMeasurer sfm(20, 10);
 
-  // ── 4. NEW: Latency buffer (re-used each step, cleared at top of loop) ────
+  // ── 4. Latency action buffer (cleared each step) ──────────────────────────
   LatencyActionBuffer lat_buf;
 
   // ─────────────────────────────────────────────────────────────────────────
-  // Main loop
-  // ─────────────────────────────────────────────────────────────────────────
   for (Ts ts = t0; ts <= t_end; ts += cfg.dt_ns) {
 
-    // ── A. Flush timed phase transitions — original logic ─────────────────
+    // ── A. Flush timed phase transitions (original logic) ──────────────────
     {
       auto flushed = engine_.flush(ts);
       if (!flushed.empty()) {
@@ -135,7 +122,6 @@ WorldResult World::run(uint64_t seed,
         const auto mid = midprice(bb, ba);
         apply_trades_to_accounts(ts, flushed, order_meta_, accounts_, mid);
 
-        // NEW: record flush trades to SF measurer
         const Price cur_mid = mid ? *mid : Price{0};
         for (const auto& tr : flushed) {
           Side aggressor = Side::Buy;
@@ -147,7 +133,7 @@ WorldResult World::run(uint64_t seed,
       }
     }
 
-    // ── B. Build MarketView — unchanged ───────────────────────────────────
+    // ── B. Build MarketView (original logic) ──────────────────────────────
     const auto bb  = engine_.book().best_bid();
     const auto ba  = engine_.book().best_ask();
     const auto mid = midprice(bb, ba);
@@ -159,29 +145,18 @@ WorldResult World::run(uint64_t seed,
     view.mid        = mid;
     view.last_trade = engine_.rules().last_trade_price();
 
-    // ── C. NEW: Record top-of-book for spread / illiquidity measurement ───
+    // ── C. Record top-of-book for spread / Amihud measurement ────────────
     if (bb && ba)
       sfm.add_top({ts, *bb, *ba, mid ? *mid : Price{0},
                    Price{0}, Price{0}});
 
-    // ── D. Collect and process agent actions ──────────────────────────────
-    //
-    //  ZERO-LATENCY (default, latency_enabled = false):
-    //    Agents act in registration order; each action processed immediately.
-    //    Output is byte-identical to original world.cpp.
-    //
-    //  LATENCY (latency_enabled = true):
-    //    Actions pushed into lat_buf with a sampled per-agent delay.
-    //    After all agents act, lat_buf is sorted by effective arrival time
-    //    and drained — lower-latency agents win ordering priority.
-
+    // ── D. Collect agent actions ──────────────────────────────────────────
     lat_buf.clear();
 
     for (std::size_t i = 0; i < agents_.size(); ++i) {
       auto& ap       = agents_[i];
       const OwnerId oid = ap->owner();
 
-      // Build AgentState — unchanged
       const auto acc_it = accounts_.find(oid);
       AgentState self{};
       self.owner = oid;
@@ -190,12 +165,11 @@ WorldResult World::run(uint64_t seed,
         self.position   = acc_it->second.position;
       }
 
-      // Ask agent for actions
       std::vector<Action> actions;
       actions.reserve(8);
       ap->step(ts, view, self, actions);
 
-      // NEW: optional FV private-signal log
+      // Optional FV signal log
       if (cfg.record_fv_signals) {
         if (auto* fva = dynamic_cast<
                 agents::FundamentalValueAgent*>(ap.get())) {
@@ -204,22 +178,22 @@ WorldResult World::run(uint64_t seed,
       }
 
       if (!cfg.latency_enabled) {
-        // Zero-latency: process immediately (original behaviour)
+        // Zero-latency path: process immediately (original behaviour)
         for (const auto& act : actions)
           process_action(ts, oid, act, out, sfm);
       } else {
-        // Latency: buffer with per-agent delay
+        // Latency path: buffer with per-agent sampled delay
         lat_buf.push(ts, oid, actions, latency_samplers_[i]);
       }
     }
 
-    // ── E. NEW: Drain latency buffer in effective-arrival-time order ──────
+    // ── E. Drain latency buffer in arrival-time order ─────────────────────
     if (cfg.latency_enabled) {
       for (const auto& pa : lat_buf.drain())
         process_action(pa.effective_ts, pa.owner, pa.action, out, sfm);
     }
 
-    // ── F. Record top-of-book snapshot — unchanged ────────────────────────
+    // ── F. Record top-of-book snapshot (original logic) ───────────────────
     BookTop top{};
     top.ts       = ts;
     top.best_bid = engine_.book().best_bid();
@@ -228,7 +202,7 @@ WorldResult World::run(uint64_t seed,
     out.tops.push_back(top);
   }
 
-  // ── 5. Final account snapshots — unchanged ────────────────────────────────
+  // ── 5. Final account snapshots (original logic) ───────────────────────────
   {
     const auto bb  = engine_.book().best_bid();
     const auto ba  = engine_.book().best_ask();
@@ -236,7 +210,7 @@ WorldResult World::run(uint64_t seed,
     out.accounts = make_account_snapshots(t_end, accounts_, mid);
   }
 
-  // ── 6. NEW: Compute stylized facts ────────────────────────────────────────
+  // ── 6. Compute stylized facts ─────────────────────────────────────────────
   if (cfg.compute_stylized_facts && sfm.n_trades() >= 10)
     out.sf = sfm.compute();
 
