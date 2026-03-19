@@ -15,6 +15,7 @@
 #include "msim/ledger.hpp"
 #include "msim/latency_model.hpp"
 #include "msim/stylized_facts.hpp"
+#include "msim/tca.hpp"           // FillRecord, StepSnapshot, AgentTCA, ArrivalInfo
 
 namespace msim {
 
@@ -27,9 +28,7 @@ struct MarketView {
   std::optional<Price> last_trade{};
 
   // Top-of-book quantities and derived imbalance.
-  // Populated each step by World::run.
   // imbalance = (bid_qty - ask_qty) / (bid_qty + ask_qty), in [-1, 1].
-  // Defaults to 0 (neutral) when book is empty.
   Qty    bid_depth = 0;
   Qty    ask_depth = 0;
   double imbalance = 0.0;
@@ -68,6 +67,7 @@ struct PendingAction {
   Ts      effective_ts{0};
   OwnerId owner{0};
   Action  action{};
+  Price   arrival_mid{0};  // mid at agent step time (for slippage tracking)
 
   bool operator<(const PendingAction& o) const noexcept {
     return effective_ts < o.effective_ts;
@@ -79,7 +79,8 @@ class LatencyActionBuffer {
 public:
   void push(Ts ts, OwnerId owner,
             const std::vector<Action>& actions,
-            LatencySampler& sampler)
+            LatencySampler& sampler,
+            Price arrival_mid)
   {
     for (const auto& act : actions) {
       const Ts delta = sampler.sample();
@@ -87,18 +88,21 @@ public:
       pa.effective_ts = ts + delta;
       pa.owner        = owner;
       pa.action       = act;
+      pa.arrival_mid  = arrival_mid;
       pending_.push_back(std::move(pa));
     }
   }
 
   void push_immediate(Ts ts, OwnerId owner,
-                      const std::vector<Action>& actions)
+                      const std::vector<Action>& actions,
+                      Price arrival_mid)
   {
     for (const auto& act : actions) {
       PendingAction pa{};
       pa.effective_ts = ts;
       pa.owner        = owner;
       pa.action       = act;
+      pa.arrival_mid  = arrival_mid;
       pending_.push_back(std::move(pa));
     }
   }
@@ -131,11 +135,26 @@ public:
 struct WorldConfig {
   Ts dt_ns{1'000'000};  // step width: 1 ms default
 
+  // Latency model
   bool latency_enabled{false};
   std::vector<LatencyDistConfig> latency_configs;
 
+  // Stylized facts
   bool compute_stylized_facts{true};
   bool record_fv_signals{false};
+
+  // TCA output
+  // record_fills: store every FillRecord in WorldResult::fills.
+  // Enables per-fill slippage analysis.  Small memory cost (one
+  // struct per trade per side).  Default on.
+  bool record_fills{true};
+
+  // record_pnl_series: store one StepSnapshot per agent per step.
+  // Enables full mark-to-market PnL series.  Memory = n_agents *
+  // n_steps * sizeof(StepSnapshot).  Default on.
+  // For very long runs with many agents, set to false and use only
+  // WorldResult::tca for summary statistics.
+  bool record_pnl_series{true};
 };
 
 // ─── FVLogEntry ───────────────────────────────────────────────────────────────
@@ -147,14 +166,31 @@ struct FVLogEntry {
 
 // ─── WorldResult ──────────────────────────────────────────────────────────────
 struct WorldResult {
+  // ── Core outputs (always populated) ────────────────────────────────────
   std::vector<Trade>           trades;
   std::vector<BookTop>         tops;
   std::vector<AccountSnapshot> accounts;
   int64_t cancel_failures{0};
   int64_t modify_failures{0};
 
-  std::optional<StyleFacts> sf;
-  std::vector<FVLogEntry>   fv_log;
+  // ── Optional outputs ────────────────────────────────────────────────────
+  std::optional<StyleFacts> sf;       // when compute_stylized_facts=true
+  std::vector<FVLogEntry>   fv_log;   // when record_fv_signals=true
+
+  // ── TCA outputs ─────────────────────────────────────────────────────────
+  // fills: every individual fill from every agent's perspective.
+  // Each trade generates two FillRecords (one maker, one taker).
+  // Populated when WorldConfig::record_fills=true.
+  std::vector<FillRecord>    fills;
+
+  // pnl_series: mark-to-market state per agent per step.
+  // rows = n_agents * n_steps.  Filter by owner to get one agent's series.
+  // Populated when WorldConfig::record_pnl_series=true.
+  std::vector<StepSnapshot>  pnl_series;
+
+  // tca: per-agent summary statistics.  Always populated.
+  // One AgentTCA per registered agent, in registration order.
+  std::vector<AgentTCA>      tca;
 };
 
 // ─── World ────────────────────────────────────────────────────────────────────
@@ -176,22 +212,29 @@ public:
 private:
   static uint64_t splitmix64(uint64_t& x) noexcept;
 
-  // Compute LOB imbalance from best-bid and best-ask quantities.
-  // Uses the top-of-book L2 snapshot.  Returns 0 if book is empty.
   double compute_imbalance(Qty& bid_depth_out,
                            Qty& ask_depth_out) const noexcept;
 
+  // process_action now takes cur_mid (for arrival tracking) and cfg.
   void process_action(Ts ts,
                       OwnerId oid,
                       const Action& act,
+                      Price cur_mid,
                       WorldResult& out,
-                      StylizedFactsMeasurer& sfm);
+                      StylizedFactsMeasurer& sfm,
+                      const WorldConfig& cfg);
 
   MatchingEngine engine_;
   std::vector<std::unique_ptr<IAgent>>   agents_;
   std::unordered_map<OrderId, OrderMeta> order_meta_;
   std::unordered_map<OwnerId, Account>   accounts_;
   std::vector<LatencySampler>            latency_samplers_;
+
+  // TCA tracking state (reset at start of each run())
+  std::unordered_map<OrderId, ArrivalInfo> arrival_info_;
+  std::unordered_map<OwnerId, int64_t>     n_limit_submitted_;
+  std::unordered_map<OwnerId, int64_t>     n_market_submitted_;
+  std::unordered_map<OwnerId, int64_t>     n_cancels_sent_;
 };
 
 } // namespace msim
