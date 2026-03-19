@@ -156,3 +156,40 @@ add_executable(run_theory src/run_theory.cpp)
 target_link_libraries(run_theory PRIVATE msim)
 msim_set_warnings(run_theory)
 msim_enable_sanitizers(run_theory)
+
+# ── Python bindings (opt-in, does not affect existing CI) ──────────────────
+#
+# Build:   cmake -S . -B build -DMSIM_BUILD_PYTHON=ON
+#          cmake --build build --target _msim_core
+#
+# Install: pip install -e ".[analysis]"   (from repo root, after building)
+#
+option(MSIM_BUILD_PYTHON "Build pybind11 Python bindings" OFF)
+
+if (MSIM_BUILD_PYTHON)
+
+  FetchContent_Declare(
+    pybind11
+    URL https://github.com/pybind/pybind11/archive/refs/tags/v2.13.6.zip
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+  )
+  FetchContent_MakeAvailable(pybind11)
+
+  pybind11_add_module(_msim_core src/python/msim_py.cpp)
+  target_link_libraries(_msim_core PRIVATE msim)
+  target_include_directories(_msim_core PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
+
+  # Apply same warnings as the rest of the project (but not sanitizers —
+  # pybind11 modules are loaded at runtime and can't link the ASan runtime
+  # into a .so the same way executables do).
+  msim_set_warnings(_msim_core)
+
+  # After building, the .so sits in build/.  Point Python at it:
+  #   PYTHONPATH=build:python python python/examples/quickstart.py
+  message(STATUS "Python bindings: ON  (_msim_core)")
+  message(STATUS "  After build, run:")
+  message(STATUS "    PYTHONPATH=build:python python python/examples/quickstart.py")
+
+endif()
