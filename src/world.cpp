@@ -42,8 +42,8 @@ double World::compute_imbalance(Qty& bid_depth_out,
   if (bid_lvls.empty() || ask_lvls.empty())
     return 0.0;
 
-  bid_depth_out = bid_lvls[0].qty;
-  ask_depth_out = ask_lvls[0].qty;
+  bid_depth_out = bid_lvls[0].total_qty;
+  ask_depth_out = ask_lvls[0].total_qty;
 
   const double bd    = static_cast<double>(bid_depth_out);
   const double ad    = static_cast<double>(ask_depth_out);
