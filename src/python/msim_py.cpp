@@ -457,6 +457,128 @@ PYBIND11_MODULE(_msim_core, m) {
         .def_readwrite("cash_ticks", &AccountSnapshot::cash_ticks)
         .def_readwrite("position",   &AccountSnapshot::position);
 
+    // ── TCA types ─────────────────────────────────────────────────────────────
+
+    py::class_<ArrivalInfo>(m, "ArrivalInfo",
+        "Mid-price and order type recorded at order submission time.")
+        .def_readwrite("arrival_mid", &ArrivalInfo::arrival_mid)
+        .def_readwrite("is_limit",    &ArrivalInfo::is_limit);
+
+    py::class_<FillRecord>(m, "FillRecord", R"pbdoc(
+        One fill event from one agent's perspective.
+
+        Every matching trade generates two FillRecords: one for the
+        maker (passive limit) and one for the taker (market/IOC).
+
+        Attributes
+        ----------
+        ts           : int   — fill timestamp (nanoseconds)
+        owner        : int   — agent OwnerId
+        order_id     : int   — the order that was filled
+        side         : Side  — Buy or Sell
+        fill_qty     : int   — lots filled
+        fill_price   : int   — execution price in ticks
+        arrival_mid  : int   — mid-price when order was submitted
+        is_maker     : bool  — True = passive limit fill
+
+        Methods
+        -------
+        slippage_ticks() -> float
+            Signed slippage vs arrival mid.
+            Positive = paid above mid (market impact cost).
+            Negative = received better than mid (limit order edge).
+    )pbdoc")
+        .def_readwrite("ts",          &FillRecord::ts)
+        .def_readwrite("owner",       &FillRecord::owner)
+        .def_readwrite("order_id",    &FillRecord::order_id)
+        .def_readwrite("side",        &FillRecord::side)
+        .def_readwrite("fill_qty",    &FillRecord::fill_qty)
+        .def_readwrite("fill_price",  &FillRecord::fill_price)
+        .def_readwrite("arrival_mid", &FillRecord::arrival_mid)
+        .def_readwrite("is_maker",    &FillRecord::is_maker)
+        .def("slippage_ticks", &FillRecord::slippage_ticks,
+             "Signed slippage vs arrival mid in ticks.")
+        .def("__repr__", [](const FillRecord& f) {
+            return "<FillRecord owner=" + std::to_string(f.owner)
+                 + " qty=" + std::to_string(f.fill_qty)
+                 + " px=" + std::to_string(f.fill_price)
+                 + " slip=" + std::to_string(f.slippage_ticks())
+                 + " maker=" + (f.is_maker ? "True" : "False") + ">";
+        });
+
+    py::class_<StepSnapshot>(m, "StepSnapshot", R"pbdoc(
+        Mark-to-market state for one agent at one simulation step.
+
+        Attributes
+        ----------
+        ts          : int  — step timestamp (nanoseconds)
+        owner       : int  — agent OwnerId
+        position    : int  — signed inventory at end of step
+        cash_ticks  : int  — realised cash P&L in ticks
+        mid         : int  — mid-price at this step (0 = empty book)
+
+        Methods
+        -------
+        mtm_pnl() -> float — cash_ticks + position * mid
+    )pbdoc")
+        .def_readwrite("ts",         &StepSnapshot::ts)
+        .def_readwrite("owner",      &StepSnapshot::owner)
+        .def_readwrite("position",   &StepSnapshot::position)
+        .def_readwrite("cash_ticks", &StepSnapshot::cash_ticks)
+        .def_readwrite("mid",        &StepSnapshot::mid)
+        .def("mtm_pnl", &StepSnapshot::mtm_pnl,
+             "Mark-to-market PnL = cash_ticks + position * mid.");
+
+    py::class_<AgentTCA>(m, "AgentTCA", R"pbdoc(
+        Per-agent Transaction Cost Analysis summary.
+
+        Computed at the end of every World.run() call.
+        One AgentTCA per registered agent, in registration order.
+
+        Attributes
+        ----------
+        owner                   : int
+        n_orders_submitted      : int
+        n_limit_submitted       : int
+        n_market_submitted      : int
+        n_cancels_sent          : int
+        n_fills_maker           : int
+        n_fills_taker           : int
+        total_qty_maker         : int
+        total_qty_taker         : int
+        total_qty_traded        : int
+        limit_fill_rate         : float  — n_fills_maker / n_limit_submitted
+        avg_slippage_ticks      : float  — mean taker slippage vs arrival mid
+        total_slippage_ticks    : float
+        turnover_notional_ticks : int    — sum(price * qty)
+        final_position          : int
+        final_cash_ticks        : int
+        final_mtm_pnl           : float
+    )pbdoc")
+        .def_readwrite("owner",                   &AgentTCA::owner)
+        .def_readwrite("n_orders_submitted",      &AgentTCA::n_orders_submitted)
+        .def_readwrite("n_limit_submitted",       &AgentTCA::n_limit_submitted)
+        .def_readwrite("n_market_submitted",      &AgentTCA::n_market_submitted)
+        .def_readwrite("n_cancels_sent",          &AgentTCA::n_cancels_sent)
+        .def_readwrite("n_fills_maker",           &AgentTCA::n_fills_maker)
+        .def_readwrite("n_fills_taker",           &AgentTCA::n_fills_taker)
+        .def_readwrite("total_qty_maker",         &AgentTCA::total_qty_maker)
+        .def_readwrite("total_qty_taker",         &AgentTCA::total_qty_taker)
+        .def_readwrite("total_qty_traded",        &AgentTCA::total_qty_traded)
+        .def_readwrite("limit_fill_rate",         &AgentTCA::limit_fill_rate)
+        .def_readwrite("avg_slippage_ticks",      &AgentTCA::avg_slippage_ticks)
+        .def_readwrite("total_slippage_ticks",    &AgentTCA::total_slippage_ticks)
+        .def_readwrite("turnover_notional_ticks", &AgentTCA::turnover_notional_ticks)
+        .def_readwrite("final_position",          &AgentTCA::final_position)
+        .def_readwrite("final_cash_ticks",        &AgentTCA::final_cash_ticks)
+        .def_readwrite("final_mtm_pnl",           &AgentTCA::final_mtm_pnl)
+        .def("__repr__", [](const AgentTCA& t) {
+            return "<AgentTCA owner=" + std::to_string(t.owner)
+                 + " pnl=" + std::to_string(t.final_mtm_pnl)
+                 + " fill_rate=" + std::to_string(t.limit_fill_rate)
+                 + " avg_slip=" + std::to_string(t.avg_slippage_ticks) + ">";
+        });
+
     // ── WorldResult ──────────────────────────────────────────────────────────
 
     py::class_<WorldResult>(m, "WorldResult", R"pbdoc(
@@ -471,6 +593,9 @@ PYBIND11_MODULE(_msim_core, m) {
         modify_failures : int
         sf              : StyleFacts | None
         fv_log          : list[FVLogEntry]
+        fills           : list[FillRecord]      — per-fill TCA data
+        pnl_series      : list[StepSnapshot]    — per-step PnL series
+        tca             : list[AgentTCA]        — per-agent summary
 
         Methods
         -------
@@ -478,6 +603,9 @@ PYBIND11_MODULE(_msim_core, m) {
         tops_df()     — pandas DataFrame of top-of-book snapshots
         accounts_df() — pandas DataFrame of final account states
         fv_df()       — pandas DataFrame of FV signal log
+        fills_df()    — pandas DataFrame of all fill records
+        pnl_df()      — pandas DataFrame of per-step PnL series
+        tca_df()      — pandas DataFrame of per-agent TCA summary
         summary()     — print stylized facts report
     )pbdoc")
         .def_readwrite("trades",          &WorldResult::trades)
@@ -486,12 +614,14 @@ PYBIND11_MODULE(_msim_core, m) {
         .def_readwrite("cancel_failures", &WorldResult::cancel_failures)
         .def_readwrite("modify_failures", &WorldResult::modify_failures)
         .def_readwrite("fv_log",          &WorldResult::fv_log)
+        .def_readwrite("fills",           &WorldResult::fills)
+        .def_readwrite("pnl_series",      &WorldResult::pnl_series)
+        .def_readwrite("tca",             &WorldResult::tca)
         .def_property_readonly("sf", [](const WorldResult& r) -> py::object {
             if (r.sf) return py::cast(*r.sf);
             return py::none();
         }, "StyleFacts if compute_stylized_facts=True, else None.")
 
-        // DataFrame helpers — only call pandas if it is actually installed
         .def("trades_df", [](const WorldResult& r) {
             py::module_ pd = py::module_::import("pandas");
             py::list rows;
@@ -506,13 +636,7 @@ PYBIND11_MODULE(_msim_core, m) {
                 rows.append(row);
             }
             return pd.attr("DataFrame")(rows);
-        }, R"pbdoc(
-            Return all trades as a pandas DataFrame.
-
-            Columns: id, ts, price, qty, maker_order_id, taker_order_id
-
-            Raises ImportError if pandas is not installed.
-        )pbdoc")
+        }, "All trades as a pandas DataFrame.")
 
         .def("tops_df", [](const WorldResult& r) {
             py::module_ pd = py::module_::import("pandas");
@@ -526,7 +650,7 @@ PYBIND11_MODULE(_msim_core, m) {
                 rows.append(row);
             }
             return pd.attr("DataFrame")(rows);
-        }, "Return top-of-book snapshots as a pandas DataFrame.")
+        }, "Top-of-book snapshots as a pandas DataFrame.")
 
         .def("accounts_df", [](const WorldResult& r) {
             py::module_ pd = py::module_::import("pandas");
@@ -539,7 +663,7 @@ PYBIND11_MODULE(_msim_core, m) {
                 rows.append(row);
             }
             return pd.attr("DataFrame")(rows);
-        }, "Return final account states as a pandas DataFrame.")
+        }, "Final account states as a pandas DataFrame.")
 
         .def("fv_df", [](const WorldResult& r) {
             py::module_ pd = py::module_::import("pandas");
@@ -552,11 +676,100 @@ PYBIND11_MODULE(_msim_core, m) {
                 rows.append(row);
             }
             return pd.attr("DataFrame")(rows);
-        }, "Return FundamentalValueAgent signal log as a pandas DataFrame.")
+        }, "FundamentalValueAgent signal log as a pandas DataFrame.")
+
+        .def("fills_df", [](const WorldResult& r) {
+            py::module_ pd = py::module_::import("pandas");
+            py::list rows;
+            for (const auto& f : r.fills) {
+                py::dict row;
+                row["ts"]          = f.ts;
+                row["owner"]       = f.owner;
+                row["order_id"]    = f.order_id;
+                row["side"]        = (f.side == Side::Buy ? "Buy" : "Sell");
+                row["fill_qty"]    = f.fill_qty;
+                row["fill_price"]  = f.fill_price;
+                row["arrival_mid"] = f.arrival_mid;
+                row["is_maker"]    = f.is_maker;
+                row["slippage"]    = f.slippage_ticks();
+                rows.append(row);
+            }
+            return pd.attr("DataFrame")(rows);
+        }, R"pbdoc(
+            All individual fills as a pandas DataFrame.
+
+            Columns: ts, owner, order_id, side, fill_qty, fill_price,
+                     arrival_mid, is_maker, slippage
+
+            Requires WorldConfig.record_fills=True (default).
+            Filter by owner and is_maker to analyse one agent's execution.
+        )pbdoc")
+
+        .def("pnl_df", [](const WorldResult& r) {
+            py::module_ pd = py::module_::import("pandas");
+            py::list rows;
+            for (const auto& s : r.pnl_series) {
+                py::dict row;
+                row["ts"]         = s.ts;
+                row["owner"]      = s.owner;
+                row["position"]   = s.position;
+                row["cash_ticks"] = s.cash_ticks;
+                row["mid"]        = s.mid;
+                row["mtm_pnl"]    = s.mtm_pnl();
+                rows.append(row);
+            }
+            return pd.attr("DataFrame")(rows);
+        }, R"pbdoc(
+            Per-agent per-step mark-to-market PnL series as a DataFrame.
+
+            Columns: ts, owner, position, cash_ticks, mid, mtm_pnl
+
+            Requires WorldConfig.record_pnl_series=True (default).
+            Filter by owner to get one agent's full PnL time series.
+
+            Example
+            -------
+            >>> df = result.pnl_df()
+            >>> agent_pnl = df[df.owner == 10].set_index("ts")["mtm_pnl"]
+        )pbdoc")
+
+        .def("tca_df", [](const WorldResult& r) {
+            py::module_ pd = py::module_::import("pandas");
+            py::list rows;
+            for (const auto& t : r.tca) {
+                py::dict row;
+                row["owner"]                   = t.owner;
+                row["n_orders_submitted"]      = t.n_orders_submitted;
+                row["n_limit_submitted"]       = t.n_limit_submitted;
+                row["n_market_submitted"]      = t.n_market_submitted;
+                row["n_cancels_sent"]          = t.n_cancels_sent;
+                row["n_fills_maker"]           = t.n_fills_maker;
+                row["n_fills_taker"]           = t.n_fills_taker;
+                row["total_qty_traded"]        = t.total_qty_traded;
+                row["limit_fill_rate"]         = t.limit_fill_rate;
+                row["avg_slippage_ticks"]      = t.avg_slippage_ticks;
+                row["turnover_notional_ticks"] = t.turnover_notional_ticks;
+                row["final_position"]          = t.final_position;
+                row["final_cash_ticks"]        = t.final_cash_ticks;
+                row["final_mtm_pnl"]           = t.final_mtm_pnl;
+                rows.append(row);
+            }
+            return pd.attr("DataFrame")(rows);
+        }, R"pbdoc(
+            Per-agent TCA summary as a pandas DataFrame.
+
+            Always populated (one row per agent regardless of config flags).
+            Columns: owner, n_orders_submitted, n_limit_submitted,
+                     n_market_submitted, n_cancels_sent, n_fills_maker,
+                     n_fills_taker, total_qty_traded, limit_fill_rate,
+                     avg_slippage_ticks, turnover_notional_ticks,
+                     final_position, final_cash_ticks, final_mtm_pnl
+        )pbdoc")
 
         .def("summary", [](const WorldResult& r) {
             if (!r.sf) {
-                py::print("No stylized facts computed (need compute_stylized_facts=True).");
+                py::print("No stylized facts computed "
+                          "(set compute_stylized_facts=True).");
                 return;
             }
             py::print(StylizedFactsMeasurer::summary(*r.sf));
@@ -574,13 +787,17 @@ PYBIND11_MODULE(_msim_core, m) {
         latency_configs         : list  — one LatencyDistConfig per agent
         compute_stylized_facts  : bool  — compute SF at end (default True)
         record_fv_signals       : bool  — log FV agent signals (default False)
+        record_fills            : bool  — store per-fill TCA records (default True)
+        record_pnl_series       : bool  — store per-step PnL snapshots (default True)
     )pbdoc")
         .def(py::init<>())
         .def_readwrite("dt_ns",                  &WorldConfig::dt_ns)
         .def_readwrite("latency_enabled",         &WorldConfig::latency_enabled)
         .def_readwrite("latency_configs",         &WorldConfig::latency_configs)
         .def_readwrite("compute_stylized_facts",  &WorldConfig::compute_stylized_facts)
-        .def_readwrite("record_fv_signals",       &WorldConfig::record_fv_signals);
+        .def_readwrite("record_fv_signals",       &WorldConfig::record_fv_signals)
+        .def_readwrite("record_fills",            &WorldConfig::record_fills)
+        .def_readwrite("record_pnl_series",       &WorldConfig::record_pnl_series);
 
     // ── LatencyDistConfig ─────────────────────────────────────────────────────
 
