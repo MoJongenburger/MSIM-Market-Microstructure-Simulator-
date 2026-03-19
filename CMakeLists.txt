@@ -154,3 +154,5 @@ msim_enable_sanitizers(msim_bench)
 
 add_executable(run_theory src/run_theory.cpp)
 target_link_libraries(run_theory PRIVATE msim)
+msim_set_warnings(run_theory)
+msim_enable_sanitizers(run_theory)
