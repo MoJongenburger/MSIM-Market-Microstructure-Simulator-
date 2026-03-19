@@ -1,6 +1,6 @@
 #pragma once
 // ============================================================
-// include/msim/world.hpp  — COMPLETE REPLACEMENT
+// include/msim/world.hpp
 // ============================================================
 
 #include <algorithm>
@@ -11,10 +11,10 @@
 #include <vector>
 
 #include "msim/matching_engine.hpp"
-#include "msim/simulator.hpp"       // BookTop
+#include "msim/simulator.hpp"
 #include "msim/ledger.hpp"
-#include "msim/latency_model.hpp"   // LatencyDistConfig, LatencySampler
-#include "msim/stylized_facts.hpp"  // StyleFacts, StylizedFactsMeasurer
+#include "msim/latency_model.hpp"
+#include "msim/stylized_facts.hpp"
 
 namespace msim {
 
@@ -25,6 +25,14 @@ struct MarketView {
   std::optional<Price> best_ask{};
   std::optional<Price> mid{};
   std::optional<Price> last_trade{};
+
+  // Top-of-book quantities and derived imbalance.
+  // Populated each step by World::run.
+  // imbalance = (bid_qty - ask_qty) / (bid_qty + ask_qty), in [-1, 1].
+  // Defaults to 0 (neutral) when book is empty.
+  Qty    bid_depth = 0;
+  Qty    ask_depth = 0;
+  double imbalance = 0.0;
 };
 
 // ─── AgentState ───────────────────────────────────────────────────────────────
@@ -50,13 +58,12 @@ struct Action {
     Action a{}; a.type = ActionType::Cancel; a.id = oid; return a;
   }
   static Action modify_qty(OrderId oid, Qty q) {
-    Action a{}; a.type = ActionType::ModifyQty; a.id = oid; a.new_qty = q; return a;
+    Action a{}; a.type = ActionType::ModifyQty;
+    a.id = oid; a.new_qty = q; return a;
   }
 };
 
 // ─── PendingAction ────────────────────────────────────────────────────────────
-// Defined here (after Action is complete) because it holds Action by value.
-// Used by LatencyActionBuffer to reorder actions by effective arrival time.
 struct PendingAction {
   Ts      effective_ts{0};
   OwnerId owner{0};
@@ -68,9 +75,6 @@ struct PendingAction {
 };
 
 // ─── LatencyActionBuffer ──────────────────────────────────────────────────────
-// Collects all agent actions in one step, then returns them sorted by
-// effective arrival time (effective_ts = ts_submitted + sampled_delay).
-// stable_sort preserves registration order for equal effective_ts.
 class LatencyActionBuffer {
 public:
   void push(Ts ts, OwnerId owner,
@@ -104,8 +108,8 @@ public:
     return pending_;
   }
 
-  void   clear()           { pending_.clear(); }
-  size_t size() const noexcept { return pending_.size(); }
+  void   clear()               noexcept { pending_.clear(); }
+  size_t size()  const noexcept { return pending_.size(); }
 
 private:
   std::vector<PendingAction> pending_;
@@ -118,24 +122,19 @@ public:
   virtual OwnerId owner() const noexcept = 0;
   virtual void seed(uint64_t s) = 0;
   virtual void step(Ts ts,
-                    const MarketView& view,
-                    const AgentState& self,
+                    const MarketView&    view,
+                    const AgentState&    self,
                     std::vector<Action>& out) = 0;
 };
 
 // ─── WorldConfig ──────────────────────────────────────────────────────────────
 struct WorldConfig {
-  Ts dt_ns{1'000'000};  // 1 ms per step
+  Ts dt_ns{1'000'000};  // step width: 1 ms default
 
-  // Latency model: if false (default) behaviour is identical to original.
-  // If true, provide one LatencyDistConfig per agent (same order as add_agent).
   bool latency_enabled{false};
   std::vector<LatencyDistConfig> latency_configs;
 
-  // Compute stylized facts at end of run; stored in WorldResult::sf.
   bool compute_stylized_facts{true};
-
-  // Log FundamentalValueAgent private signal each step → WorldResult::fv_log.
   bool record_fv_signals{false};
 };
 
@@ -154,8 +153,8 @@ struct WorldResult {
   int64_t cancel_failures{0};
   int64_t modify_failures{0};
 
-  std::optional<StyleFacts>  sf;       // set when compute_stylized_facts = true
-  std::vector<FVLogEntry>    fv_log;   // set when record_fv_signals = true
+  std::optional<StyleFacts> sf;
+  std::vector<FVLogEntry>   fv_log;
 };
 
 // ─── World ────────────────────────────────────────────────────────────────────
@@ -163,27 +162,36 @@ class World {
 public:
   explicit World(MatchingEngine engine) : engine_(std::move(engine)) {}
 
-  void add_agent(std::unique_ptr<IAgent> a) { agents_.push_back(std::move(a)); }
+  void add_agent(std::unique_ptr<IAgent> a) {
+    agents_.push_back(std::move(a));
+  }
 
-  WorldResult run(uint64_t seed, double horizon_seconds, WorldConfig cfg = {});
+  WorldResult run(uint64_t seed,
+                  double   horizon_seconds,
+                  WorldConfig cfg = {});
 
-  MatchingEngine&       engine_mut() noexcept { return engine_; }
+  MatchingEngine&       engine_mut() noexcept       { return engine_; }
   const MatchingEngine& engine()     const noexcept { return engine_; }
 
 private:
   static uint64_t splitmix64(uint64_t& x) noexcept;
 
-  MatchingEngine engine_;
-  std::vector<std::unique_ptr<IAgent>>   agents_;
-  std::unordered_map<OrderId, OrderMeta> order_meta_;
-  std::unordered_map<OwnerId, Account>   accounts_;
-  std::vector<LatencySampler>            latency_samplers_;
+  // Compute LOB imbalance from best-bid and best-ask quantities.
+  // Uses the top-of-book L2 snapshot.  Returns 0 if book is empty.
+  double compute_imbalance(Qty& bid_depth_out,
+                           Qty& ask_depth_out) const noexcept;
 
   void process_action(Ts ts,
                       OwnerId oid,
                       const Action& act,
                       WorldResult& out,
                       StylizedFactsMeasurer& sfm);
+
+  MatchingEngine engine_;
+  std::vector<std::unique_ptr<IAgent>>   agents_;
+  std::unordered_map<OrderId, OrderMeta> order_meta_;
+  std::unordered_map<OwnerId, Account>   accounts_;
+  std::vector<LatencySampler>            latency_samplers_;
 };
 
 } // namespace msim
