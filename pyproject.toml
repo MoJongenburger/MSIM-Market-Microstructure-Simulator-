@@ -1,0 +1,44 @@
+[build-system]
+requires = ["scikit-build-core>=0.9", "pybind11>=2.13"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "msim"
+version = "0.1.0"
+description = "Market Microstructure Simulator — sub-100ns C++20 matching engine with Python strategy interface"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+keywords = [
+    "quantitative-finance", "market-microstructure",
+    "limit-order-book", "matching-engine", "simulation",
+    "high-frequency-trading", "algorithmic-trading",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Office/Business :: Financial",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: C++",
+]
+
+dependencies = []   # core has zero Python dependencies
+
+[project.optional-dependencies]
+analysis = ["pandas>=2.0", "numpy>=1.24", "matplotlib>=3.7"]
+all = ["msim[analysis]", "seaborn", "jupyter"]
+
+[project.urls]
+Homepage   = "https://github.com/MoJongenburger/MSIM-Market-Microstructure-Simulator-"
+Issues     = "https://github.com/MoJongenburger/MSIM-Market-Microstructure-Simulator-/issues"
+
+[tool.scikit-build]
+cmake.args   = ["-DMSIM_BUILD_PYTHON=ON"]
+cmake.build-type = "Release"
+wheel.packages = ["python/msim"]
