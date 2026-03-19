@@ -151,3 +151,6 @@ add_executable(msim_bench
 target_link_libraries(msim_bench PRIVATE msim benchmark::benchmark benchmark::benchmark_main)
 msim_set_warnings(msim_bench)
 msim_enable_sanitizers(msim_bench)
+
+add_executable(run_theory src/run_theory.cpp)
+target_link_libraries(run_theory PRIVATE msim)
