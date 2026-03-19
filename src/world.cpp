@@ -22,10 +22,6 @@ uint64_t World::splitmix64(uint64_t& x) noexcept {
 
 // ---------------------------------------------------------------------------
 // compute_imbalance
-// Derives (V_bid - V_ask) / (V_bid + V_ask) from top-of-book L2.
-// Uses book::depth(Side, levels) which returns a vector of BookLevel by
-// value -- this is the existing path benchmarked by BM_BookDepth_TopN.
-// If your book does not yet expose depth(), imbalance defaults to 0.
 // ---------------------------------------------------------------------------
 double World::compute_imbalance(Qty& bid_depth_out,
                                 Qty& ask_depth_out) const noexcept
@@ -33,14 +29,10 @@ double World::compute_imbalance(Qty& bid_depth_out,
   bid_depth_out = 0;
   ask_depth_out = 0;
 
-  // depth(side, n_levels) returns std::vector<BookLevel> by value.
-  // Each BookLevel has .price and .qty.
-  // We only need the top level (n=1).
   const auto bid_lvls = engine_.book().depth(Side::Buy,  1);
   const auto ask_lvls = engine_.book().depth(Side::Sell, 1);
 
-  if (bid_lvls.empty() || ask_lvls.empty())
-    return 0.0;
+  if (bid_lvls.empty() || ask_lvls.empty()) return 0.0;
 
   bid_depth_out = bid_lvls[0].total_qty;
   ask_depth_out = ask_lvls[0].total_qty;
@@ -53,16 +45,31 @@ double World::compute_imbalance(Qty& bid_depth_out,
 
 // ---------------------------------------------------------------------------
 // process_action
+//
+// cur_mid: the mid-price at the time this action is dispatched.
+//          Used to record ArrivalInfo for slippage measurement.
 // ---------------------------------------------------------------------------
 void World::process_action(Ts ts,
-                            OwnerId /*oid*/,
+                            OwnerId oid,
                             const Action& act,
+                            Price cur_mid,
                             WorldResult& out,
-                            StylizedFactsMeasurer& sfm)
+                            StylizedFactsMeasurer& sfm,
+                            const WorldConfig& cfg)
 {
   if (act.type == ActionType::Submit) {
     Order o = act.order;
     o.ts = ts;
+
+    // Record arrival info for slippage tracking
+    const bool is_limit = (o.type == OrderType::Limit);
+    arrival_info_[o.id] = ArrivalInfo{cur_mid, is_limit};
+
+    // Track submission counts per owner
+    if (is_limit)
+      n_limit_submitted_[oid]++;
+    else
+      n_market_submitted_[oid]++;
 
     order_meta_[o.id] = OrderMeta{o.owner, o.side};
 
@@ -78,19 +85,69 @@ void World::process_action(Ts ts,
       apply_trades_to_accounts(ts, res.trades, order_meta_,
                                 accounts_, mid2);
 
-      const Price cur_mid = mid2 ? *mid2 : Price{0};
+      const Price cur_mid2 = mid2 ? *mid2 : Price{0};
+
       for (const auto& tr : res.trades) {
+        // ── Stylized facts recording ─────────────────────────────────
         Side aggressor = Side::Buy;
         if (auto it = order_meta_.find(tr.taker_order_id);
             it != order_meta_.end())
           aggressor = it->second.side;
-        sfm.add_trade({tr.ts, tr.price, tr.qty, aggressor, cur_mid});
+        sfm.add_trade({tr.ts, tr.price, tr.qty, aggressor, cur_mid2});
+
+        // ── TCA: generate one FillRecord per side per trade ──────────
+        if (cfg.record_fills) {
+          // -- Maker side (passive limit) ------------------------------
+          if (auto mit = order_meta_.find(tr.maker_order_id);
+              mit != order_meta_.end())
+          {
+            FillRecord fr{};
+            fr.ts          = tr.ts;
+            fr.owner       = mit->second.owner;
+            fr.order_id    = tr.maker_order_id;
+            fr.side        = mit->second.side;
+            fr.fill_qty    = tr.qty;
+            fr.fill_price  = tr.price;
+            fr.is_maker    = true;
+            if (auto ai = arrival_info_.find(tr.maker_order_id);
+                ai != arrival_info_.end())
+              fr.arrival_mid = ai->second.arrival_mid;
+            out.fills.push_back(fr);
+          }
+          // -- Taker side (aggressive) ---------------------------------
+          if (auto tit = order_meta_.find(tr.taker_order_id);
+              tit != order_meta_.end())
+          {
+            FillRecord fr{};
+            fr.ts          = tr.ts;
+            fr.owner       = tit->second.owner;
+            fr.order_id    = tr.taker_order_id;
+            fr.side        = tit->second.side;
+            fr.fill_qty    = tr.qty;
+            fr.fill_price  = tr.price;
+            fr.is_maker    = false;
+            if (auto ai = arrival_info_.find(tr.taker_order_id);
+                ai != arrival_info_.end())
+              fr.arrival_mid = ai->second.arrival_mid;
+            out.fills.push_back(fr);
+          }
+        }
+
+        // Clean up arrival info for fully consumed orders.
+        // (Partial fills leave it in place for subsequent fills.)
+        // We don't know fill completeness here without extra state,
+        // so we leave cleanup to end-of-run to keep the hot path lean.
       }
     }
 
   } else if (act.type == ActionType::Cancel) {
-    if (!engine_.book_mut().cancel(act.id))
+    if (!engine_.book_mut().cancel(act.id)) {
       out.cancel_failures++;
+    } else {
+      // Clean up arrival info for cancelled orders
+      arrival_info_.erase(act.id);
+      n_cancels_sent_[oid]++;
+    }
 
   } else { // ModifyQty
     if (!engine_.book_mut().modify_qty(act.id, act.new_qty))
@@ -132,10 +189,21 @@ WorldResult World::run(uint64_t seed,
     }
   }
 
-  // 3. Stylized facts measurer
-  StylizedFactsMeasurer sfm(20, 10);
+  // 3. Reset TCA tracking state
+  arrival_info_.clear();
+  n_limit_submitted_.clear();
+  n_market_submitted_.clear();
+  n_cancels_sent_.clear();
 
-  // 4. Latency buffer
+  // 4. Pre-allocate PnL series if needed
+  if (cfg.record_pnl_series) {
+    const Ts n_steps = (t_end / cfg.dt_ns) + 1;
+    out.pnl_series.reserve(
+        static_cast<std::size_t>(n_steps) * agents_.size());
+  }
+
+  // 5. Stylized facts measurer and latency buffer
+  StylizedFactsMeasurer sfm(20, 10);
   LatencyActionBuffer lat_buf;
 
   // -------------------------------------------------------------------------
@@ -159,6 +227,8 @@ WorldResult World::run(uint64_t seed,
               it != order_meta_.end())
             aggressor = it->second.side;
           sfm.add_trade({tr.ts, tr.price, tr.qty, aggressor, cur_mid});
+          // Note: auction fills go into out.trades but not out.fills —
+          // they have no agent-submitted order to attribute slippage to.
         }
       }
     }
@@ -174,17 +244,13 @@ WorldResult World::run(uint64_t seed,
     view.best_ask   = ba;
     view.mid        = mid;
     view.last_trade = engine_.rules().last_trade_price();
+    view.imbalance  = compute_imbalance(view.bid_depth, view.ask_depth);
 
-    // B1. LOB imbalance via book::depth(Side, 1).
-    // If book::depth does not exist in your version, this will be a
-    // compile error -- comment out the try block and the imbalance
-    // fields will remain 0 (safe default: symmetric quotes).
-    view.imbalance = compute_imbalance(view.bid_depth, view.ask_depth);
+    const Price cur_mid = mid ? *mid : Price{0};
 
     // C. Record top for stylized facts
     if (bb && ba)
-      sfm.add_top({ts, *bb, *ba, mid ? *mid : Price{0},
-                   Price{0}, Price{0}});
+      sfm.add_top({ts, *bb, *ba, cur_mid, Price{0}, Price{0}});
 
     // D. Collect agent actions
     lat_buf.clear();
@@ -205,6 +271,7 @@ WorldResult World::run(uint64_t seed,
       actions.reserve(8);
       ap->step(ts, view, self, actions);
 
+      // Optional FV signal log
       if (cfg.record_fv_signals) {
         if (auto* fva = dynamic_cast<
                 agents::FundamentalValueAgent*>(ap.get()))
@@ -213,36 +280,80 @@ WorldResult World::run(uint64_t seed,
 
       if (!cfg.latency_enabled) {
         for (const auto& act : actions)
-          process_action(ts, oid, act, out, sfm);
+          process_action(ts, oid, act, cur_mid, out, sfm, cfg);
       } else {
-        lat_buf.push(ts, oid, actions, latency_samplers_[i]);
+        lat_buf.push(ts, oid, actions, latency_samplers_[i], cur_mid);
       }
     }
 
-    // E. Drain latency buffer
+    // E. Drain latency buffer in arrival-time order
     if (cfg.latency_enabled) {
       for (const auto& pa : lat_buf.drain())
-        process_action(pa.effective_ts, pa.owner, pa.action, out, sfm);
+        process_action(pa.effective_ts, pa.owner, pa.action,
+                       pa.arrival_mid, out, sfm, cfg);
     }
 
     // F. Snapshot top-of-book
-    BookTop top{};
-    top.ts       = ts;
-    top.best_bid = engine_.book().best_bid();
-    top.best_ask = engine_.book().best_ask();
-    top.mid      = midprice(top.best_bid, top.best_ask);
-    out.tops.push_back(top);
+    {
+      BookTop top{};
+      top.ts       = ts;
+      top.best_bid = engine_.book().best_bid();
+      top.best_ask = engine_.book().best_ask();
+      top.mid      = midprice(top.best_bid, top.best_ask);
+      out.tops.push_back(top);
+    }
+
+    // G. Record per-agent PnL snapshot (TCA)
+    if (cfg.record_pnl_series) {
+      const Price snap_mid = mid ? *mid : Price{0};
+      for (const auto& ap : agents_) {
+        const OwnerId oid = ap->owner();
+        StepSnapshot snap{};
+        snap.ts    = ts;
+        snap.owner = oid;
+        snap.mid   = snap_mid;
+        if (const auto acc_it = accounts_.find(oid);
+            acc_it != accounts_.end()) {
+          snap.position   = acc_it->second.position;
+          snap.cash_ticks = acc_it->second.cash_ticks;
+        }
+        out.pnl_series.push_back(snap);
+      }
+    }
   }
 
-  // 5. Final account snapshots
+  // 6. Final account snapshots
   {
     const auto bb  = engine_.book().best_bid();
     const auto ba  = engine_.book().best_ask();
     const auto mid = midprice(bb, ba);
     out.accounts = make_account_snapshots(t_end, accounts_, mid);
+
+    // 7. Compute AgentTCA summary for every registered agent
+    const Price final_mid = mid ? *mid : Price{0};
+    out.tca.reserve(agents_.size());
+    for (const auto& ap : agents_) {
+      const OwnerId oid = ap->owner();
+      int64_t final_pos  = 0;
+      int64_t final_cash = 0;
+      if (const auto acc_it = accounts_.find(oid);
+          acc_it != accounts_.end()) {
+        final_pos  = acc_it->second.position;
+        final_cash = acc_it->second.cash_ticks;
+      }
+      out.tca.push_back(compute_agent_tca(
+          oid,
+          n_limit_submitted_[oid],
+          n_market_submitted_[oid],
+          n_cancels_sent_[oid],
+          out.fills,
+          final_pos,
+          final_cash,
+          final_mid));
+    }
   }
 
-  // 6. Stylized facts
+  // 8. Stylized facts
   if (cfg.compute_stylized_facts && sfm.n_trades() >= 10)
     out.sf = sfm.compute();
 
