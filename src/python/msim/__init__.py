@@ -48,11 +48,32 @@ Writing a custom strategy
 ...         o.mkt_style = msim.MarketStyle.PureMarket
 ...         self._counter += 1
 ...         return [msim.Action.submit(o)]
+
+Scenario runner
+---------------
+>>> from msim.scenario import ScenarioRunner, metrics_sf, metrics_tca
+>>>
+>>> def factory(params):
+...     w = msim.make_world(mid=10_000)
+...     cfg = msim.HawkesNoiseConfig()
+...     cfg.hawkes.mu = params["hawkes_mu"]
+...     w.add_agent(msim.agents.HawkesNoiseTrader(owner_id=1, config=cfg))
+...     w.add_agent(msim.agents.MarketMakerAS(owner_id=10))
+...     return w
+>>>
+>>> runner = ScenarioRunner(
+...     world_factory = factory,
+...     param_grid    = {"hawkes_mu": [5.0, 10.0, 20.0]},
+...     metrics       = [metrics_sf, metrics_tca(owner_id=10)],
+...     n_seeds       = 20,
+... )
+>>> runner.run()
+>>> df = runner.results_df()
 """
 
 from __future__ import annotations
 
-# Re-export everything from the compiled C++ extension
+# ── C++ extension ─────────────────────────────────────────────────────────────
 from ._msim_core import (
     # Enums
     Side,
@@ -92,6 +113,17 @@ from ._msim_core import (
     HawkesNoiseConfig,
     MarketMakerASConfig,
 
+    # Execution agent configs  (added in execution agents step)
+    VWAPConfig,
+    TWAPConfig,
+    ISConfig,
+    VWAPSchedule,
+
+    # TCA types  (added in TCA step)
+    FillRecord,
+    StepSnapshot,
+    AgentTCA,
+
     # Core classes
     Agent,
     WorldResult,
@@ -105,14 +137,31 @@ from ._msim_core import (
     __author__,
 )
 
+# ── Pure-Python submodules ────────────────────────────────────────────────────
+from . import analysis   # noqa: F401
+from . import execution  # noqa: F401
+from . import scenario   # noqa: F401
+
+# ── Scenario runner convenience re-exports ────────────────────────────────────
+from .scenario import (
+    ScenarioRunner,
+    metrics_sf,
+    metrics_tca,
+    metrics_all_tca,
+    metrics_execution_is,
+    single_param_sweep,
+    sensitivity_analysis,
+)
+
+# ── Public API ────────────────────────────────────────────────────────────────
 __all__ = [
     # Enums
     "Side", "OrderType", "TimeInForce", "MarketStyle",
-    "ActionType", "LatencyDistType",
+    "ActionType", "LatencyDistType", "VWAPSchedule",
     # Data
     "Order", "Trade", "BookTop", "LevelSummary",
     "MarketView", "AgentState", "Action", "FVLogEntry",
-    "AccountSnapshot",
+    "AccountSnapshot", "FillRecord", "StepSnapshot", "AgentTCA",
     # Stylized facts
     "ReturnStats", "AutocorrResult", "PriceImpactResult",
     "SpreadStats", "AmihudStats", "StyleFacts",
@@ -120,16 +169,21 @@ __all__ = [
     "WorldConfig", "LatencyDistConfig", "HawkesConfig",
     "FundamentalValueConfig", "MomentumConfig",
     "HawkesNoiseConfig", "MarketMakerASConfig",
+    "VWAPConfig", "TWAPConfig", "ISConfig",
     # Core
     "Agent", "WorldResult", "World",
     # Submodules
-    "agents",
-    # Helpers
+    "agents", "analysis", "execution", "scenario",
+    # Scenario helpers
+    "ScenarioRunner", "metrics_sf", "metrics_tca",
+    "metrics_all_tca", "metrics_execution_is",
+    "single_param_sweep", "sensitivity_analysis",
+    # World helpers
     "quick_run", "make_world",
 ]
 
 
-# ─── Convenience helpers ───────────────────────────────────────────────────────
+# ── Convenience helpers ───────────────────────────────────────────────────────
 
 def make_world(
     mid: int = 10_000,
