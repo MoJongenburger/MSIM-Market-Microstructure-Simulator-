@@ -1,420 +1,285 @@
+#pragma once
 // ============================================================
-// src/world.cpp
+// include/msim/world.hpp
 // ============================================================
-#include "msim/world.hpp"
-#include "msim/agents/fundamental_value_agent.hpp"
 
 #include <algorithm>
-#include <cmath>
-#include <numeric>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <unordered_map>
+#include <vector>
+
+#include "msim/matching_engine.hpp"
+#include "msim/simulator.hpp"
+#include "msim/ledger.hpp"
+#include "msim/latency_model.hpp"
+#include "msim/stylized_facts.hpp"
+#include "msim/tca.hpp"
 
 namespace msim {
 
-// ---------------------------------------------------------------------------
-// splitmix64
-// ---------------------------------------------------------------------------
-uint64_t World::splitmix64(uint64_t& x) noexcept {
-  uint64_t z = (x += 0x9e3779b97f4a7c15ull);
-  z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
-  z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
-  return z ^ (z >> 31);
-}
+// ─── MarketView ───────────────────────────────────────────────────────────────
+struct MarketView {
+  Ts ts{};
+  std::optional<Price> best_bid{};
+  std::optional<Price> best_ask{};
+  std::optional<Price> mid{};
+  std::optional<Price> last_trade{};
 
-// ---------------------------------------------------------------------------
-// compute_imbalance
-// ---------------------------------------------------------------------------
-double World::compute_imbalance(Qty& bid_depth_out,
-                                Qty& ask_depth_out) const noexcept
-{
-  bid_depth_out = 0;
-  ask_depth_out = 0;
+  // Top-of-book quantities and derived imbalance.
+  // imbalance = (bid_qty - ask_qty) / (bid_qty + ask_qty), in [-1, 1].
+  Qty    bid_depth = 0;
+  Qty    ask_depth = 0;
+  double imbalance = 0.0;
+};
 
-  const auto bid_lvls = engine_.book().depth(Side::Buy,  1);
-  const auto ask_lvls = engine_.book().depth(Side::Sell, 1);
-
-  if (bid_lvls.empty() || ask_lvls.empty()) return 0.0;
-
-  bid_depth_out = bid_lvls[0].total_qty;
-  ask_depth_out = ask_lvls[0].total_qty;
-
-  const double bd    = static_cast<double>(bid_depth_out);
-  const double ad    = static_cast<double>(ask_depth_out);
-  const double total = bd + ad;
-  return (total > 0.0) ? (bd - ad) / total : 0.0;
-}
-
-// ---------------------------------------------------------------------------
-// build_queue_positions
+// ─── QueuePosition ────────────────────────────────────────────────────────────
+// Describes where one of an agent's resting limit orders sits in the book.
+// Delivered inside AgentState::queue_positions every step.
 //
-// Queries queue_info() for every entry in active_limits_[oid].
-// Entries where found=false (order fully filled since last step) are
-// pruned from active_limits_ in the same pass — no separate cleanup needed.
-// ---------------------------------------------------------------------------
-void World::build_queue_positions(OwnerId oid, AgentState& state)
-{
-  state.queue_positions.clear();
+// The key fields for strategy decisions:
+//
+//   qty_ahead       — lots that must fill before this order is reached.
+//                     0 = this order is at the front of the queue (next to fill).
+//
+//   qty_behind      — lots resting behind this order at the same price.
+//                     A large qty_behind means the level has staying power;
+//                     a small one means the level will disappear if hit.
+//
+//   level_total     — total qty at this price = qty_ahead + own_qty + qty_behind.
+//
+//   own_qty         — remaining quantity of this order.
+//
+//   position_index  — 0-based FIFO index.  0 = next to fill.
+//
+// Example decision rule for a market maker:
+//   if (qp.qty_ahead == 0 && spread_narrowing)
+//       cancel_and_requote_further();   // at front, about to be adversely selected
+//   if (qp.qty_ahead > 2 * avg_trade_size)
+//       relax();                        // deep in queue, unlikely to fill soon
+struct QueuePosition {
+  OrderId order_id{};
+  Price   price{};
+  Side    side{};
+  Qty     qty_ahead{};        // lots ahead in queue
+  Qty     qty_behind{};       // lots behind in queue
+  Qty     level_total{};      // total qty at this price level
+  Qty     own_qty{};          // remaining qty of this order
+  int     position_index{};   // 0-based FIFO position
+};
 
-  auto& ids = active_limits_[oid];
-  if (ids.empty()) return;
+// ─── AgentState ───────────────────────────────────────────────────────────────
+// Extended with queue_positions: one entry per resting GTC limit order
+// this agent currently has in the book.  Empty if the agent has no resting
+// orders, or if WorldConfig::track_queue_positions = false.
+struct AgentState {
+  OwnerId owner{};
+  int64_t cash_ticks{0};
+  int64_t position{0};
 
-  std::vector<OrderId> still_active;
-  still_active.reserve(ids.size());
+  // Queue positions for all resting GTC limit orders owned by this agent.
+  // Populated each step before agent.step() is called.
+  // Empty when track_queue_positions = false (default: true).
+  std::vector<QueuePosition> queue_positions;
+};
 
-  for (const OrderId order_id : ids) {
-    const QueueInfo qi = engine_.book().queue_info(order_id);
-    if (!qi.found) continue;   // fully filled — drop from active_limits_
+// ─── Action ───────────────────────────────────────────────────────────────────
+enum class ActionType : uint8_t { Submit = 0, Cancel = 1, ModifyQty = 2 };
 
-    still_active.push_back(order_id);
+struct Action {
+  ActionType type{ActionType::Submit};
+  Order      order{};
+  OrderId    id{};
+  Qty        new_qty{};
 
-    // Look up side from order_meta_
-    Side side = Side::Buy;
-    if (auto it = order_meta_.find(order_id); it != order_meta_.end())
-      side = it->second.side;
-
-    // Look up limit price from cache
-    Price price = 0;
-    if (auto it = order_price_cache_.find(order_id);
-        it != order_price_cache_.end())
-      price = it->second;
-
-    QueuePosition qp{};
-    qp.order_id       = order_id;
-    qp.price          = price;
-    qp.side           = side;
-    qp.qty_ahead      = qi.qty_ahead;
-    qp.qty_behind     = qi.qty_behind;
-    qp.level_total    = qi.level_total;
-    qp.own_qty        = qi.own_qty;
-    qp.position_index = qi.position_index;
-    state.queue_positions.push_back(qp);
+  static Action submit(const Order& o) {
+    Action a{}; a.type = ActionType::Submit; a.order = o; return a;
   }
-
-  ids = std::move(still_active);
-}
-
-// ---------------------------------------------------------------------------
-// process_action
-// ---------------------------------------------------------------------------
-void World::process_action(Ts ts,
-                            OwnerId oid,
-                            const Action& act,
-                            Price cur_mid,
-                            WorldResult& out,
-                            StylizedFactsMeasurer& sfm,
-                            const WorldConfig& cfg)
-{
-  if (act.type == ActionType::Submit) {
-    Order o = act.order;
-    o.ts = ts;
-
-    const bool is_limit = (o.type == OrderType::Limit);
-    arrival_info_[o.id] = ArrivalInfo{cur_mid, is_limit};
-
-    if (is_limit)
-      n_limit_submitted_[oid]++;
-    else
-      n_market_submitted_[oid]++;
-
-    order_meta_[o.id] = OrderMeta{o.owner, o.side};
-
-    // Cache the limit price for queue position reporting
-    if (is_limit)
-      order_price_cache_[o.id] = o.price;
-
-    auto res = engine_.process(o);
-
-    // If this was a GTC limit and it rested (not immediately fully filled),
-    // add to active_limits_ for queue position tracking.
-    // Heuristic: it rested if the order type is Limit AND TimeInForce == GTC
-    // AND it either had no trades at all, or had trades but the order still
-    // appears in the book (partial fill).  We use queue_info() to check.
-    if (is_limit && o.tif == TimeInForce::GTC && cfg.track_queue_positions) {
-      const QueueInfo qi = engine_.book().queue_info(o.id);
-      if (qi.found) {
-        active_limits_[oid].push_back(o.id);
-      }
-    }
-
-    if (!res.trades.empty()) {
-      out.trades.insert(out.trades.end(),
-                        res.trades.begin(), res.trades.end());
-
-      const auto bb2  = engine_.book().best_bid();
-      const auto ba2  = engine_.book().best_ask();
-      const auto mid2 = midprice(bb2, ba2);
-      apply_trades_to_accounts(ts, res.trades, order_meta_,
-                                accounts_, mid2);
-
-      const Price cur_mid2 = mid2 ? *mid2 : Price{0};
-
-      for (const auto& tr : res.trades) {
-        Side aggressor = Side::Buy;
-        if (auto it = order_meta_.find(tr.taker_order_id);
-            it != order_meta_.end())
-          aggressor = it->second.side;
-        sfm.add_trade({tr.ts, tr.price, tr.qty, aggressor, cur_mid2});
-
-        if (cfg.record_fills) {
-          if (auto mit = order_meta_.find(tr.maker_order_id);
-              mit != order_meta_.end())
-          {
-            FillRecord fr{};
-            fr.ts          = tr.ts;
-            fr.owner       = mit->second.owner;
-            fr.order_id    = tr.maker_order_id;
-            fr.side        = mit->second.side;
-            fr.fill_qty    = tr.qty;
-            fr.fill_price  = tr.price;
-            fr.is_maker    = true;
-            if (auto ai = arrival_info_.find(tr.maker_order_id);
-                ai != arrival_info_.end())
-              fr.arrival_mid = ai->second.arrival_mid;
-            out.fills.push_back(fr);
-          }
-          if (auto tit = order_meta_.find(tr.taker_order_id);
-              tit != order_meta_.end())
-          {
-            FillRecord fr{};
-            fr.ts          = tr.ts;
-            fr.owner       = tit->second.owner;
-            fr.order_id    = tr.taker_order_id;
-            fr.side        = tit->second.side;
-            fr.fill_qty    = tr.qty;
-            fr.fill_price  = tr.price;
-            fr.is_maker    = false;
-            if (auto ai = arrival_info_.find(tr.taker_order_id);
-                ai != arrival_info_.end())
-              fr.arrival_mid = ai->second.arrival_mid;
-            out.fills.push_back(fr);
-          }
-        }
-      }
-    }
-
-  } else if (act.type == ActionType::Cancel) {
-    if (!engine_.book_mut().cancel(act.id)) {
-      out.cancel_failures++;
-    } else {
-      arrival_info_.erase(act.id);
-      order_price_cache_.erase(act.id);
-      n_cancels_sent_[oid]++;
-
-      // Remove from active_limits_
-      auto& ids = active_limits_[oid];
-      ids.erase(std::remove(ids.begin(), ids.end(), act.id), ids.end());
-    }
-
-  } else { // ModifyQty
-    if (!engine_.book_mut().modify_qty(act.id, act.new_qty))
-      out.modify_failures++;
+  static Action cancel(OrderId oid) {
+    Action a{}; a.type = ActionType::Cancel; a.id = oid; return a;
   }
-}
-
-// ---------------------------------------------------------------------------
-// run
-// ---------------------------------------------------------------------------
-WorldResult World::run(uint64_t seed,
-                       double   horizon_seconds,
-                       WorldConfig cfg)
-{
-  WorldResult out{};
-  const Ts t0    = 0;
-  const Ts t_end = static_cast<Ts>(
-      std::llround(horizon_seconds * 1'000'000'000.0));
-
-  // 1. Seed agents
-  uint64_t sm = seed;
-  for (std::size_t i = 0; i < agents_.size(); ++i) {
-    const uint64_t s = splitmix64(sm)
-                       ^ (static_cast<uint64_t>(i) + 1ull);
-    agents_[i]->seed(s);
+  static Action modify_qty(OrderId oid, Qty q) {
+    Action a{}; a.type = ActionType::ModifyQty;
+    a.id = oid; a.new_qty = q; return a;
   }
+};
 
-  // 2. Build LatencySamplers
-  latency_samplers_.clear();
-  latency_samplers_.reserve(agents_.size());
+// ─── PendingAction ────────────────────────────────────────────────────────────
+struct PendingAction {
+  Ts      effective_ts{0};
+  OwnerId owner{0};
+  Action  action{};
+  Price   arrival_mid{0};
+
+  bool operator<(const PendingAction& o) const noexcept {
+    return effective_ts < o.effective_ts;
+  }
+};
+
+// ─── LatencyActionBuffer ──────────────────────────────────────────────────────
+class LatencyActionBuffer {
+public:
+  void push(Ts ts, OwnerId owner,
+            const std::vector<Action>& actions,
+            LatencySampler& sampler,
+            Price arrival_mid)
   {
-    uint64_t lat_sm = seed ^ 0xDEAD'BEEF'CAFE'BABEull;
-    for (std::size_t i = 0; i < agents_.size(); ++i) {
-      const uint64_t lat_seed = splitmix64(lat_sm);
-      LatencyDistConfig ldc{LatencyDistType::FIXED, 0.0};
-      if (cfg.latency_enabled && i < cfg.latency_configs.size())
-        ldc = cfg.latency_configs[i];
-      latency_samplers_.emplace_back(lat_seed, ldc);
+    for (const auto& act : actions) {
+      const Ts delta = sampler.sample();
+      PendingAction pa{};
+      pa.effective_ts = ts + delta;
+      pa.owner        = owner;
+      pa.action       = act;
+      pa.arrival_mid  = arrival_mid;
+      pending_.push_back(std::move(pa));
     }
   }
 
-  // 3. Reset tracking state
-  arrival_info_.clear();
-  n_limit_submitted_.clear();
-  n_market_submitted_.clear();
-  n_cancels_sent_.clear();
-  active_limits_.clear();
-  order_price_cache_.clear();
-
-  // 4. Pre-allocate PnL series
-  if (cfg.record_pnl_series) {
-    const Ts n_steps = (t_end / cfg.dt_ns) + 1;
-    out.pnl_series.reserve(
-        static_cast<std::size_t>(n_steps) * agents_.size());
-  }
-
-  // 5. Stylized facts measurer and latency buffer
-  StylizedFactsMeasurer sfm(20, 10);
-  LatencyActionBuffer lat_buf;
-
-  // -------------------------------------------------------------------------
-  for (Ts ts = t0; ts <= t_end; ts += cfg.dt_ns) {
-
-    // A. Flush timed events
-    {
-      auto flushed = engine_.flush(ts);
-      if (!flushed.empty()) {
-        out.trades.insert(out.trades.end(),
-                          flushed.begin(), flushed.end());
-        const auto bb  = engine_.book().best_bid();
-        const auto ba  = engine_.book().best_ask();
-        const auto mid = midprice(bb, ba);
-        apply_trades_to_accounts(ts, flushed, order_meta_,
-                                  accounts_, mid);
-        const Price cur_mid = mid ? *mid : Price{0};
-        for (const auto& tr : flushed) {
-          Side aggressor = Side::Buy;
-          if (auto it = order_meta_.find(tr.taker_order_id);
-              it != order_meta_.end())
-            aggressor = it->second.side;
-          sfm.add_trade({tr.ts, tr.price, tr.qty, aggressor, cur_mid});
-        }
-      }
-    }
-
-    // B. Build MarketView
-    const auto bb  = engine_.book().best_bid();
-    const auto ba  = engine_.book().best_ask();
-    const auto mid = midprice(bb, ba);
-
-    MarketView view{};
-    view.ts         = ts;
-    view.best_bid   = bb;
-    view.best_ask   = ba;
-    view.mid        = mid;
-    view.last_trade = engine_.rules().last_trade_price();
-    view.imbalance  = compute_imbalance(view.bid_depth, view.ask_depth);
-
-    const Price cur_mid = mid ? *mid : Price{0};
-
-    // C. Record top for stylized facts
-    if (bb && ba)
-      sfm.add_top({ts, *bb, *ba, cur_mid, Price{0}, Price{0}});
-
-    // D. Collect agent actions
-    lat_buf.clear();
-
-    for (std::size_t i = 0; i < agents_.size(); ++i) {
-      auto& ap          = agents_[i];
-      const OwnerId oid = ap->owner();
-
-      const auto acc_it = accounts_.find(oid);
-      AgentState self{};
-      self.owner = oid;
-      if (acc_it != accounts_.end()) {
-        self.cash_ticks = acc_it->second.cash_ticks;
-        self.position   = acc_it->second.position;
-      }
-
-      // D1. Populate queue positions for this agent's resting orders
-      if (cfg.track_queue_positions)
-        build_queue_positions(oid, self);
-
-      std::vector<Action> actions;
-      actions.reserve(8);
-      ap->step(ts, view, self, actions);
-
-      if (cfg.record_fv_signals) {
-        if (auto* fva = dynamic_cast<
-                agents::FundamentalValueAgent*>(ap.get()))
-          out.fv_log.push_back({ts, oid, fva->fundamental_value()});
-      }
-
-      if (!cfg.latency_enabled) {
-        for (const auto& act : actions)
-          process_action(ts, oid, act, cur_mid, out, sfm, cfg);
-      } else {
-        lat_buf.push(ts, oid, actions, latency_samplers_[i], cur_mid);
-      }
-    }
-
-    // E. Drain latency buffer
-    if (cfg.latency_enabled) {
-      for (const auto& pa : lat_buf.drain())
-        process_action(pa.effective_ts, pa.owner, pa.action,
-                       pa.arrival_mid, out, sfm, cfg);
-    }
-
-    // F. Snapshot top-of-book
-    {
-      BookTop top{};
-      top.ts       = ts;
-      top.best_bid = engine_.book().best_bid();
-      top.best_ask = engine_.book().best_ask();
-      top.mid      = midprice(top.best_bid, top.best_ask);
-      out.tops.push_back(top);
-    }
-
-    // G. Record per-agent PnL snapshot
-    if (cfg.record_pnl_series) {
-      const Price snap_mid = mid ? *mid : Price{0};
-      for (const auto& ap : agents_) {
-        const OwnerId oid = ap->owner();
-        StepSnapshot snap{};
-        snap.ts    = ts;
-        snap.owner = oid;
-        snap.mid   = snap_mid;
-        if (const auto acc_it = accounts_.find(oid);
-            acc_it != accounts_.end()) {
-          snap.position   = acc_it->second.position;
-          snap.cash_ticks = acc_it->second.cash_ticks;
-        }
-        out.pnl_series.push_back(snap);
-      }
-    }
-  }
-
-  // 6. Final account snapshots + TCA
+  void push_immediate(Ts ts, OwnerId owner,
+                      const std::vector<Action>& actions,
+                      Price arrival_mid)
   {
-    const auto bb  = engine_.book().best_bid();
-    const auto ba  = engine_.book().best_ask();
-    const auto mid = midprice(bb, ba);
-    out.accounts = make_account_snapshots(t_end, accounts_, mid);
-
-    const Price final_mid = mid ? *mid : Price{0};
-    out.tca.reserve(agents_.size());
-    for (const auto& ap : agents_) {
-      const OwnerId oid = ap->owner();
-      int64_t final_pos  = 0;
-      int64_t final_cash = 0;
-      if (const auto acc_it = accounts_.find(oid);
-          acc_it != accounts_.end()) {
-        final_pos  = acc_it->second.position;
-        final_cash = acc_it->second.cash_ticks;
-      }
-      out.tca.push_back(compute_agent_tca(
-          oid,
-          n_limit_submitted_[oid],
-          n_market_submitted_[oid],
-          n_cancels_sent_[oid],
-          out.fills,
-          final_pos,
-          final_cash,
-          final_mid));
+    for (const auto& act : actions) {
+      PendingAction pa{};
+      pa.effective_ts = ts;
+      pa.owner        = owner;
+      pa.action       = act;
+      pa.arrival_mid  = arrival_mid;
+      pending_.push_back(std::move(pa));
     }
   }
 
-  // 7. Stylized facts
-  if (cfg.compute_stylized_facts && sfm.n_trades() >= 10)
-    out.sf = sfm.compute();
+  const std::vector<PendingAction>& drain() {
+    std::stable_sort(pending_.begin(), pending_.end());
+    return pending_;
+  }
 
-  return out;
-}
+  void   clear()               noexcept { pending_.clear(); }
+  size_t size()  const noexcept { return pending_.size(); }
+
+private:
+  std::vector<PendingAction> pending_;
+};
+
+// ─── IAgent ───────────────────────────────────────────────────────────────────
+class IAgent {
+public:
+  virtual ~IAgent() = default;
+  virtual OwnerId owner() const noexcept = 0;
+  virtual void seed(uint64_t s) = 0;
+  virtual void step(Ts ts,
+                    const MarketView&    view,
+                    const AgentState&    self,
+                    std::vector<Action>& out) = 0;
+};
+
+// ─── WorldConfig ──────────────────────────────────────────────────────────────
+struct WorldConfig {
+  Ts dt_ns{1'000'000};
+
+  // Latency model
+  bool latency_enabled{false};
+  std::vector<LatencyDistConfig> latency_configs;
+
+  // Stylized facts
+  bool compute_stylized_facts{true};
+  bool record_fv_signals{false};
+
+  // TCA output
+  bool record_fills{true};
+  bool record_pnl_series{true};
+
+  // Queue position tracking.
+  // When true, AgentState::queue_positions is populated each step for
+  // every agent that has resting GTC limit orders in the book.
+  // Cost: O(k) per resting limit order per step, where k = position_index.
+  // For strategies with O(2-4) resting orders this is negligible.
+  // Set to false for scenarios where you never inspect queue positions
+  // (e.g. pure market-order strategies) to avoid the overhead.
+  bool track_queue_positions{true};
+};
+
+// ─── FVLogEntry ───────────────────────────────────────────────────────────────
+struct FVLogEntry {
+  Ts      ts{};
+  OwnerId owner{};
+  double  V{};
+};
+
+// ─── WorldResult ──────────────────────────────────────────────────────────────
+struct WorldResult {
+  std::vector<Trade>           trades;
+  std::vector<BookTop>         tops;
+  std::vector<AccountSnapshot> accounts;
+  int64_t cancel_failures{0};
+  int64_t modify_failures{0};
+
+  std::optional<StyleFacts> sf;
+  std::vector<FVLogEntry>   fv_log;
+
+  std::vector<FillRecord>    fills;
+  std::vector<StepSnapshot>  pnl_series;
+  std::vector<AgentTCA>      tca;
+};
+
+// ─── World ────────────────────────────────────────────────────────────────────
+class World {
+public:
+  explicit World(MatchingEngine engine) : engine_(std::move(engine)) {}
+
+  void add_agent(std::unique_ptr<IAgent> a) {
+    agents_.push_back(std::move(a));
+  }
+
+  WorldResult run(uint64_t seed,
+                  double   horizon_seconds,
+                  WorldConfig cfg = {});
+
+  MatchingEngine&       engine_mut() noexcept       { return engine_; }
+  const MatchingEngine& engine()     const noexcept { return engine_; }
+
+private:
+  static uint64_t splitmix64(uint64_t& x) noexcept;
+
+  double compute_imbalance(Qty& bid_depth_out,
+                           Qty& ask_depth_out) const noexcept;
+
+  void process_action(Ts ts,
+                      OwnerId oid,
+                      const Action& act,
+                      Price cur_mid,
+                      WorldResult& out,
+                      StylizedFactsMeasurer& sfm,
+                      const WorldConfig& cfg);
+
+  // Build queue positions for one agent from active_limits_.
+  // Fills AgentState::queue_positions and prunes stale entries from
+  // active_limits_[oid] (orders that have been fully filled since last step).
+  void build_queue_positions(OwnerId oid,
+                             AgentState& state);
+
+  MatchingEngine engine_;
+  std::vector<std::unique_ptr<IAgent>>   agents_;
+  std::unordered_map<OrderId, OrderMeta> order_meta_;
+  std::unordered_map<OwnerId, Account>   accounts_;
+  std::vector<LatencySampler>            latency_samplers_;
+
+  // TCA tracking state
+  std::unordered_map<OrderId, ArrivalInfo> arrival_info_;
+  std::unordered_map<OwnerId, int64_t>     n_limit_submitted_;
+  std::unordered_map<OwnerId, int64_t>     n_market_submitted_;
+  std::unordered_map<OwnerId, int64_t>     n_cancels_sent_;
+
+  // Queue position tracking: active GTC limit order IDs per owner.
+  // Entries are added when a GTC limit is accepted into the book and
+  // lazily pruned when queue_info() returns found=false (order filled).
+  std::unordered_map<OwnerId, std::vector<OrderId>> active_limits_;
+
+  // Cache of limit order prices (OrderId → Price) so build_queue_positions()
+  // can populate QueuePosition::price without re-querying the book.
+  // Entries are erased on cancel and lazily on fill (via active_limits_ pruning).
+  std::unordered_map<OrderId, Price> order_price_cache_;
+};
 
 } // namespace msim
