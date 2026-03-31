@@ -139,4 +139,66 @@ std::size_t OrderBook::level_count(Side side) const noexcept {
   return (side == Side::Buy) ? bids_.size() : asks_.size();
 }
 
+
+QueueInfo OrderBook::queue_info(OrderId id) const noexcept {
+  // 1. Look up the order's locator
+  const auto loc_it = loc_.find(id);
+  if (loc_it == loc_.end())
+    return QueueInfo{};   // not in book — fully filled or never rested
+
+  const Locator& loc = loc_it->second;
+
+  // 2. Find the level
+  // We walk the list from begin() to loc.it, accumulating qty_ahead.
+  // Complexity: O(k) where k = position_index.  For typical books with
+  // O(10) orders per level this is negligible.
+  const Queue* q_ptr = nullptr;
+  Qty level_total    = 0;
+
+  if (loc.side == Side::Buy) {
+    const auto lvl_it = bids_.find(loc.price);
+    if (lvl_it == bids_.end()) return QueueInfo{};
+    q_ptr       = &lvl_it->second.q;
+    level_total =  lvl_it->second.total_qty;
+  } else {
+    const auto lvl_it = asks_.find(loc.price);
+    if (lvl_it == asks_.end()) return QueueInfo{};
+    q_ptr       = &lvl_it->second.q;
+    level_total =  lvl_it->second.total_qty;
+  }
+
+  const Queue& q = *q_ptr;
+
+  // 3. Walk from front to the order's iterator
+  QueueInfo info{};
+  info.found       = true;
+  info.level_total = level_total;
+
+  int  idx         = 0;
+  Qty  ahead       = 0;
+  bool found_self  = false;
+
+  for (auto it = q.begin(); it != q.end(); ++it) {
+    if (it == loc.it) {
+      // This is our order
+      info.own_qty        = it->qty;
+      info.qty_ahead      = ahead;
+      info.position_index = idx;
+      found_self          = true;
+    } else if (!found_self) {
+      ahead += it->qty;
+      ++idx;
+    } else {
+      // Orders after ours contribute to qty_behind
+      info.qty_behind += it->qty;
+    }
+  }
+
+  if (!found_self) {
+    // Iterator was stale — order is gone (shouldn't happen in normal use)
+    return QueueInfo{};
+  }
+
+  return info;
+}
 } // namespace msim
