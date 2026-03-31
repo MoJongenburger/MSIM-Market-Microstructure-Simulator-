@@ -1,4 +1,5 @@
 # MSIM — Market Microstructure Simulator (C++20)
+
 <!-- Badges -->
 ![C++](https://img.shields.io/badge/C%2B%2B-20-blue)
 ![CMake](https://img.shields.io/badge/CMake-3.20%2B-064F8C)
@@ -8,16 +9,16 @@
 ![Throughput](https://img.shields.io/badge/Throughput-~10.5M%20ops%2Fs-blueviolet)
 ![License](https://img.shields.io/github/license/MoJongenburger/MSIM-Market-Microstructure-Simulator-)
 
-MSIM is a deterministic, event-driven **limit order book + matching engine** written in modern **C++20**, built as a **microstructure research sandbox** for studying execution mechanics, venue rules, and agent interaction.
+MSIM is a deterministic, event-driven **limit order book + matching engine** written in modern **C++20**, built as a **microstructure research sandbox** for studying execution mechanics, venue rules, and agent interaction. It ships with a full **Python strategy interface** via pybind11, so strategies can be written in Python against the same sub-100ns C++ engine.
 
 The project prioritizes **reproducibility, correctness, and extensibility**. Its architecture deliberately separates:
 
 * **Core exchange mechanics** (order book, matching, trade printing)
 * **Rule / policy logic** (admission checks, market phases, auctions, halts)
-* **Agent layer** (informed traders, trend-followers, noise traders, market makers)
-* **Measurement layer** (stylized facts validation against empirical regularities)
+* **Agent layer** (informed traders, trend-followers, noise traders, market makers, execution algorithms)
+* **Measurement layer** (stylized facts, TCA, PnL series, queue position tracking)
 
-This keeps the "exchange kernel" small and testable while allowing realistic venue behaviour to be layered on without rewriting the matching engine.
+This keeps the "exchange kernel" small and testable while allowing realistic venue behavior to be layered on without rewriting the matching engine.
 
 ---
 
@@ -66,10 +67,81 @@ Quick stats (from `plot_bench_suite.py`) — **all in nanoseconds**:
 
 ---
 
+## Python Quick Start
+
+```bash
+# Build with Python bindings
+cmake -S . -B build -DMSIM_BUILD_PYTHON=ON
+cmake --build build --target _msim_core
+
+# Install the Python package (editable)
+pip install -e ".[analysis]"
+```
+
+```python
+import msim
+
+# Create a world with a pre-filled symmetric book
+world = msim.make_world(mid=10_000, levels=20, qty=10)
+
+# Register agents
+world.add_agent(msim.agents.HawkesNoiseTrader(owner_id=1))
+world.add_agent(msim.agents.MarketMakerAS(owner_id=2))
+
+# Run 2 seconds of simulation
+result = world.run(seed=42, horizon=2.0)
+
+# Inspect outputs
+print(result.trades_df().head())     # all trades
+print(result.tca_df())               # per-agent TCA summary
+result.summary()                     # stylized facts report
+```
+
+### Writing a custom strategy
+
+```python
+class MyStrategy(msim.Agent):
+    def __init__(self, owner_id: int):
+        super().__init__()
+        self._owner   = owner_id
+        self._counter = 0
+
+    def owner(self) -> int:
+        return self._owner
+
+    def seed(self, s: int) -> None:
+        import random
+        self._rng     = random.Random(s)
+        self._counter = 0
+
+    def step(self, ts: int, view: msim.MarketView,
+             state: msim.AgentState) -> list:
+        if not view.has_quote():
+            return []
+        # Check queue position of any resting orders
+        for qp in state.queue_positions:
+            if qp.is_front() and view.spread() and view.spread() <= 2:
+                # At front of queue, spread is thin — potential adverse selection
+                return [msim.Action.cancel(qp.order_id)]
+        # Submit a market buy
+        o           = msim.Order()
+        o.id        = (self._owner << 24) | (self._counter & 0xFFFFFF)
+        o.owner     = self._owner
+        o.side      = msim.Side.Buy
+        o.type      = msim.OrderType.Market
+        o.qty       = 1
+        o.tif       = msim.TimeInForce.IOC
+        o.mkt_style = msim.MarketStyle.PureMarket
+        self._counter += 1
+        return [msim.Action.submit(o)]
+```
+
+---
+
 ## Why it's built this way
 
 * **Deterministic replay**
-  Microstructure experiments must be repeatable: the same event stream and seed should produce the same trades and book evolution. Every agent uses a splitmix64-derived seed so runs are bit-for-bit reproducible.
+  Microstructure experiments must be repeatable: the same event stream and seed produce bit-for-bit identical trades, fills, and book evolution. Every agent uses a splitmix64-derived seed. The scenario runner uses the same derivation so 1000-seed sweeps are fully reproducible.
 
 * **Separation of concerns**
   Matching is a narrow, correctness-critical component. Venue rules evolve quickly. MSIM keeps those concerns cleanly separated so new rules don't destabilize the core engine.
@@ -81,139 +153,251 @@ Quick stats (from `plot_bench_suite.py`) — **all in nanoseconds**:
   Real venues are session-driven: continuous trading, auctions (volatility/closing/reopen), and halts. MSIM treats "market phase" as a first-class concept integrated into processing.
 
 * **Empirical validation built in**
-  The stylized facts measurer runs automatically at the end of every simulation. It checks whether the generated microstructure data reproduces known empirical regularities — fat-tailed returns, volatility clustering, order-flow autocorrelation, and Glosten-Milgrom spread predictions — making it straightforward to assess whether a new agent configuration is calibrated to realistic behaviour.
+  The stylized facts measurer runs automatically at the end of every simulation. It checks whether the generated data reproduces five canonical empirical regularities: fat-tailed returns, volatility clustering, order-flow autocorrelation, Glosten-Milgrom spread prediction, and nonzero Kyle's lambda.
 
-* **Multiple "front-ends" for the same engine**
-  MSIM supports both offline simulation (CSV outputs for analysis) and live interaction (web gateway + UI) without changing the exchange core.
+* **Python-first research interface**
+  The C++ engine is the performance foundation; the Python layer is the research interface. Researchers write strategies in Python, query TCA outputs as DataFrames, sweep parameters with the scenario runner, and benchmark execution algorithms — all without touching C++.
 
 ---
 
-## Features implemented
+## Features
 
 ### Core book + matching
 
 * Price–time priority **limit order book** (FIFO per price level)
-* **Market** and **Limit** orders
-* Partial fills and multi-level sweeps
+* **Market** and **Limit** orders with partial fills and multi-level sweeps
 * L2 depth snapshots (top-N levels) + top-of-book tracking
-* **Cancel** and **reduce-only modify** (modify can only reduce quantity)
+* **Cancel** and **reduce-only modify** (preserves time priority)
 
-### Order instructions (exchange-style)
+### Order instructions
 
 * **Time-in-Force:** GTC / IOC / FOK
-  * IOC: execute immediately, remainder canceled
-  * FOK: atomic — fills completely or does nothing
-* **Market-to-Limit:** if a market order partially fills, the remainder becomes a resting limit at the last execution price
+* **Market-to-Limit:** partial market fill remainder becomes a resting limit
 
-### Rule / policy layer (admission + governance)
+### Rule / policy layer
 
-* Structured rejects (reason codes): invalid order, market halted, tick size violations, lot size / min quantity violations
-* Reference price tracking (last trade, with mid-price fallback)
+* Structured rejects with reason codes: invalid order, market halted, tick/lot violations
+* Reference price tracking (last trade, mid-price fallback)
 
 ### Market phases + auctions
 
-* Phases: Continuous, Auction (uncrossing), Trading-at-Last, Closing Auction, Halted (circuit breaker)
-* **Auction uncrossing** at a single clearing price: candidates derived from limit prices, maximize executable volume, tie-break by closest to reference price
+* Phases: Continuous, Auction (uncrossing), Trading-at-Last, Closing Auction, Halted
+* **Auction uncrossing** at a single clearing price: maximize executable volume, tie-break by closest to reference price
+* **Price bands + volatility interruption** → transition to auction
+* **Circuit breaker halt + reopening auction**
 
-### Stability mechanisms (real-venue inspired)
+### Self-Trade Prevention
 
-* **Price bands + volatility interruption:** band breach on first execution price → transition to auction
-* **Circuit breaker halt + reopening auction:** large downward move triggers a halt; halt expires into a reopening auction with frozen book liquidity moved into the auction queue
+* Modes: None, CancelTaker, CancelMaker
 
-### Self-Trade Prevention (STP)
+---
 
-* STP modes: None, CancelTaker, CancelMaker
+## Agents
 
-### Agent-driven simulation (World + agents)
+| Agent | Config | Description |
+|---|---|---|
+| `NoiseTrader` | — | Random market/limit order flow |
+| `MarketMaker` | — | Quotes around mid with inventory skew |
+| `FundamentalValueAgent` | `FundamentalValueConfig` | Glosten-Milgrom informed trader with OU private signal |
+| `MomentumAgent` | `MomentumConfig` | MACD trend-follower with position limits |
+| `HawkesNoiseTrader` | `HawkesNoiseConfig` | Self-exciting noise trader (Hawkes process arrivals) |
+| `MarketMakerAS` | `MarketMakerASConfig` | Avellaneda-Stoikov optimal quoting with imbalance skew |
+| `VWAPAgent` | `VWAPConfig` | VWAP execution (FLAT / U_SHAPE / CUSTOM schedule) |
+| `TWAPAgent` | `TWAPConfig` | Uniform time-slicing execution baseline |
+| `ISAgent` | `ISConfig` | Almgren-Chriss optimal IS trajectory |
+| `QueueAwareMarketMaker` | `QueueAwareMMConfig` | A-S market maker with queue-position cancel logic |
 
-* Agent **World** wrapper around the matching engine
-* Deterministic stepping with splitmix64-derived per-agent seeding
-* **Agents implemented:**
+### Hawkes Noise Trader
 
-  | Agent | File | Description |
-  |---|---|---|
-  | `NoiseTrader` | `agents/noise_trader.hpp` | Random market/limit order flow |
-  | `MarketMaker` | `agents/market_maker.hpp` | Quotes around mid with inventory skew and periodic refresh |
-  | `FundamentalValueAgent` | `agents/fundamental_value_agent.hpp` | Glosten-Milgrom informed trader with Ornstein-Uhlenbeck private signal |
-  | `MomentumAgent` | `agents/momentum_agent.hpp` | MACD trend-follower with position limits |
-
-* CI smoke test verifies deterministic behaviour for fixed seed
-
-### Fundamental Value Agent (Glosten-Milgrom informed trader)
-
-The `FundamentalValueAgent` models a trader with a private signal about fundamental value. The signal follows a discrete **Ornstein-Uhlenbeck** mean-reverting process:
-
-```
-V_{t+1} = V_t + κ(μ − V_t) + σ_v · Z,   Z ~ N(0,1)
-```
-
-The agent buys when `V_t − ask > threshold` (asset underpriced) and sells when `bid − V_t > threshold` (asset overpriced), submitting IOC market orders. This reproduces the informed-trader component of the Glosten-Milgrom (1985) spread model: adverse selection from informed order flow widens the equilibrium spread.
-
-```cpp
-FundamentalValueConfig cfg;
-cfg.kappa     = 0.005;   // mean-reversion speed
-cfg.sigma_v   = 1.5;     // signal volatility (ticks/step)
-cfg.threshold = 1.0;     // mispricing required to trade (ticks)
-cfg.lot_size  = 5;
-
-world.add_agent(std::make_unique<FundamentalValueAgent>(owner_id, cfg));
-```
-
-### Momentum Agent (MACD trend-follower)
-
-The `MomentumAgent` computes a MACD signal from exponential moving averages of the mid-price:
+Replaces flat Poisson arrival with a self-exciting process:
 
 ```
-signal_t = EMA_fast(mid, α_f) − EMA_slow(mid, α_s),   α = 2/(N+1)
+λ(t) = μ + ψ(t),   ψ_{t+1} = ψ_t · exp(−β·dt) + α·N_t
 ```
 
-It enters long when `signal > entry_band`, enters short when `signal < −entry_band`, and flattens when `|signal| < exit_band`. Inventory is capped at `±max_position`. The agent reproduces the order-flow autocorrelation ("herding") component of stylized facts — momentum traders systematically generate autocorrelated trade signs on the same side.
+Order side is biased by LOB imbalance (Cont, Kukanov & Stoikov 2014), so noise traders partially follow short-term book pressure.
 
-```cpp
-MomentumConfig cfg;
-cfg.alpha_fast   = 2.0 / 6.0;    // 5-step EMA
-cfg.alpha_slow   = 2.0 / 21.0;   // 20-step EMA
-cfg.entry_band   = 0.30;
-cfg.exit_band    = 0.05;
-cfg.lot_size     = 3;
-cfg.max_position = 15;
+### Avellaneda-Stoikov Market Maker
 
-world.add_agent(std::make_unique<MomentumAgent>(owner_id, cfg));
+Implements the full A-S (2008) optimal quoting formula with EWMA volatility estimation and LOB imbalance skew:
+
+```
+r     = s − q·γ·σ²·(T−t) + α_imb·I·σ
+δ*    = γ·σ²·(T−t) + (2/γ)·ln(1 + γ/κ)
 ```
 
-### Per-Agent Latency Model
+Quote bid at `r − δ*/2`, ask at `r + δ*/2`.
 
-Every agent can be assigned an independent network latency distribution. When enabled, each action is stamped with a sampled delay `δ_i ~ F_i`, and all actions within a step are processed in effective-arrival-time order (`ts + δ_i`), so lower-latency agents win execution priority.
+### Implementation Shortfall Agent (Almgren-Chriss)
 
-Four distributions are supported:
+Executes the optimal trajectory minimising `E[IS] + λ·Var[IS]`:
 
-| Distribution | Use case |
-|---|---|
-| `FIXED` | HFT colocation — constant sub-microsecond delay |
-| `GAUSSIAN` | Easy to calibrate from exchange timestamps |
-| `LOG_NORMAL` | Best empirical model for real network jitter |
-| `UNIFORM` | Simple worst-case bound |
-
-```cpp
-WorldConfig cfg;
-cfg.latency_enabled = true;
-
-// Provide one entry per agent, in registration order:
-cfg.latency_configs = {
-    {LatencyDistType::FIXED,      500.0},           // HFT: 500 ns fixed
-    {LatencyDistType::LOG_NORMAL, 50'000.0, 10'000.0}, // retail: ~50 µs
-};
-
-// Or use the two-tier factory:
-auto wlc = WorldLatencyConfig::two_tier(/*n_fast=*/2, /*n_slow=*/5);
-cfg.latency_configs = wlc.agent_configs;
+```
+x_k = X · sinh(κ(T−k)) / sinh(κT),   κ = √(λ·σ²/η)
 ```
 
-When `latency_enabled = false` (the default), behaviour is byte-identical to the original deterministic loop — zero overhead.
+With `λ=0` degenerates to TWAP. High `λ` front-loads execution.
 
-### Stylized Facts Measurement
+---
 
-The `StylizedFactsMeasurer` runs automatically at the end of every `World::run()` call (controlled by `WorldConfig::compute_stylized_facts`). It validates the simulation output against five canonical empirical regularities:
+## TCA / PnL Output Layer
+
+Every `World::run()` call now returns structured execution analytics alongside raw trades.
+
+### Per-fill records
+
+```python
+result.fills_df()
+# Columns: ts, owner, order_id, side, fill_qty, fill_price,
+#          arrival_mid, is_maker, slippage
+```
+
+`slippage` = signed deviation from the mid-price at order submission. Positive = paid above mid (market impact cost). Negative = filled inside mid (limit order edge).
+
+### Per-step PnL series
+
+```python
+df = result.pnl_df()
+# Columns: ts, owner, position, cash_ticks, mid, mtm_pnl
+agent_pnl = df[df.owner == 2].set_index("ts")["mtm_pnl"]
+```
+
+`mtm_pnl = cash_ticks + position × mid` — full mark-to-market at every step.
+
+### Per-agent TCA summary
+
+```python
+result.tca_df()
+# Columns: owner, n_orders_submitted, n_limit_submitted,
+#          n_market_submitted, n_cancels_sent, n_fills_maker,
+#          n_fills_taker, total_qty_traded, limit_fill_rate,
+#          avg_slippage_ticks, turnover_notional_ticks,
+#          final_position, final_cash_ticks, final_mtm_pnl
+```
+
+Always populated regardless of `record_fills` / `record_pnl_series` flags.
+
+---
+
+## Execution Algorithm Benchmarking
+
+```python
+from msim import execution as ex
+
+# Compare TWAP vs VWAP vs IS across one simulation
+results = {
+    "TWAP":  r_twap,
+    "VWAP":  r_vwap,
+    "IS":    r_is,
+}
+comparison = ex.compare_strategies(results, owner_ids={...})
+print(comparison[["is_ticks", "is_bps", "completion_rate"]])
+
+# Plot cumulative execution curves
+ex.plot_execution(r_is, owner_id=52, label="IS (λ=0.01)")
+ex.plot_is_comparison(comparison)
+```
+
+Implementation Shortfall vs arrival price:
+```
+IS (ticks) = (avg_fill_price − arrival_price) × qty  [buys]
+```
+Positive IS = paid above arrival price.
+
+---
+
+## Queue Position Visibility
+
+Every GTC limit order an agent has resting in the book is described in `AgentState.queue_positions` before `step()` is called:
+
+```python
+def step(self, ts, view, state):
+    for qp in state.queue_positions:
+        print(f"Order {qp.order_id} at px={qp.price}: "
+              f"ahead={qp.qty_ahead}, behind={qp.qty_behind}, "
+              f"front={qp.is_front()}, frac={qp.queue_fraction():.2f}")
+    return []
+```
+
+`queue_fraction()` = `qty_ahead / level_total`. 0 = at the front of the queue. Useful for adverseselection avoidance: if `is_front()` and the spread is narrowing, cancel before being adversely selected.
+
+Disable overhead when not needed:
+
+```python
+cfg = msim.WorldConfig()
+cfg.track_queue_positions = False  # skip for pure market-order strategies
+```
+
+---
+
+## Scenario Runner
+
+Systematic strategy stress-testing across parameter grids and multiple seeds:
+
+```python
+from msim.scenario import ScenarioRunner, metrics_sf, metrics_tca
+
+def factory(params):
+    w = msim.make_world(mid=10_000)
+    cfg = msim.HawkesNoiseConfig()
+    cfg.hawkes.mu = params["hawkes_mu"]
+    w.add_agent(msim.agents.HawkesNoiseTrader(owner_id=1, config=cfg))
+    w.add_agent(msim.agents.MarketMakerAS(owner_id=10))
+    return w
+
+runner = ScenarioRunner(
+    world_factory = factory,
+    param_grid    = {"hawkes_mu": [5.0, 10.0, 20.0],
+                     "mm_gamma":  [0.005, 0.01]},
+    metrics       = [metrics_sf, metrics_tca(owner_id=10)],
+    n_seeds       = 50,
+    n_workers     = 4,
+)
+runner.run()
+df = runner.summary_df()
+# Returns mean, std, p5, p25, p50, p75, p95 per parameter combination
+```
+
+Built-in metric extractors: `metrics_sf`, `metrics_tca(owner_id)`, `metrics_all_tca`, `metrics_execution_is(owner_id)`.
+
+For large sweeps, use the performance-tuned config:
+
+```python
+from msim.scenario_perf import sweep_config, fast_config
+
+runner = ScenarioRunner(
+    factory, grid, metrics,
+    n_seeds      = 200,
+    world_config = fast_config(n_agents=5, horizon_seconds=1.0),
+)
+```
+
+`fast_config()` disables fills, pnl_series, queue tracking, and pre-reserves all hash maps — eliminating rehashing entirely during 1000-seed sweeps.
+
+---
+
+## Performance Improvements
+
+Hash map rehashing was the dominant cost in scenario sweeps. All six `unordered_map`s in `World` now use `max_load_factor(0.5)` + `reserve()` before the simulation loop.
+
+```python
+cfg = msim.WorldConfig()
+cfg.capacity.expected_orders = 25_000   # eliminates all rehashing
+cfg.capacity.expected_trades = 7_500    # pre-reserves fills vector
+```
+
+Output vectors are pre-reserved from `n_steps` (computed once at run start):
+- `out.tops` — exactly `n_steps` entries, zero reallocations
+- `out.fills` — reserved from `expected_trades * 2`
+- `out.pnl_series` — reserved from `n_steps * n_agents`
+
+The `OrderBook::reserve(n)` method pre-reserves the book's internal `loc_` map with the same load factor.
+
+---
+
+## Stylized Facts Measurement
+
+Runs automatically after every `World::run()` (controlled by `WorldConfig::compute_stylized_facts`):
 
 | Statistic | Description | Validation criterion |
 |---|---|---|
@@ -223,24 +407,7 @@ The `StylizedFactsMeasurer` runs automatically at the end of every `World::run()
 | Kyle's lambda | Linear price impact (OLS) | `lambda ≠ 0` |
 | Time-weighted spread | Positive bid-ask spread | `tw_spread > 0` |
 
-It also computes Amihud illiquidity, effective/realized spread decomposition, and a log-log power-law impact exponent (theory predicts δ ≈ 0.5).
-
-```cpp
-WorldConfig cfg;
-cfg.compute_stylized_facts = true;   // default: true
-
-auto result = world.run(seed, horizon_s, cfg);
-
-if (result.sf) {
-    std::cout << StylizedFactsMeasurer::summary(*result.sf);
-    // Write one-row CSV for batch experiments:
-    std::ofstream f("sf.csv");
-    f << StylizedFactsMeasurer::to_csv_header();
-    f << StylizedFactsMeasurer::to_csv_row(*result.sf);
-}
-```
-
-Example output:
+Also computes Amihud illiquidity, effective/realized spread decomposition, and power-law impact exponent.
 
 ```
 === MSIM Stylized Facts Report ===
@@ -248,90 +415,89 @@ Example output:
 Return Distribution (n=1847):
   Mean:            -0.000031 ticks
   Std dev:         0.00412 ticks
-  Skewness:        -0.113
   Excess kurtosis: 3.87  [OK — fat tails]
 
 Autocorrelation (max_lag=20):
-  Return AC lag-1:     -0.021
   |Return| AC lag-1:   0.142  [OK — vol clustering]
   Trade-sign AC lag-1: 0.318  [OK — flow autocorr]
 
 Price Impact:
   Kyle's lambda:   0.48 ticks/lot
-  R²:              0.31
   Power exponent:  0.53  (theory ~0.5)
 
-Validation:
-  Fat tails:       PASS
-  Vol clustering:  PASS
-  Flow autocorr:   PASS
-  Positive spread: PASS
-  Nonzero impact:  PASS
+Validation: Fat tails PASS | Vol clustering PASS | Flow autocorr PASS |
+            Positive spread PASS | Nonzero impact PASS
 ```
 
-### FV signal log
+---
 
-When `WorldConfig::record_fv_signals = true`, the private fundamental value `V_t` of every `FundamentalValueAgent` is recorded at each step into `WorldResult::fv_log`. This enables post-hoc analysis of the informed trader's signal relative to realized prices.
+## Per-Agent Latency Model
 
-### Live gateway + web UI
+Every agent can be assigned an independent network latency distribution. When enabled, actions are processed in effective-arrival-time order (`ts + δ_i`), so lower-latency agents win execution priority.
 
-* **`msim_gateway`** executable runs a live simulation loop and exposes a **local HTTP interface**
-* A minimal **web UI** (served from `web/`) displays live top-of-book, live trades/price evolution, and the ability to send orders into the live book
-* Designed so the UI talks to the gateway while the exchange core remains unchanged
+| Distribution | Use case |
+|---|---|
+| `FIXED` | HFT colocation — constant sub-microsecond delay |
+| `GAUSSIAN` | Easy to calibrate from exchange timestamps |
+| `LOG_NORMAL` | Best empirical model for real network jitter |
+| `UNIFORM` | Simple worst-case bound |
 
-### Engineering quality
+```python
+cfg = msim.WorldConfig()
+cfg.latency_enabled = True
+cfg.latency_configs = [
+    msim.LatencyDistConfig.fixed(500.0),              # HFT: 500 ns
+    msim.LatencyDistConfig.lognormal(50_000, 10_000), # retail: ~50 µs
+]
+```
 
-* CMake targets: library + CLI + gateway + tests + benchmarks
-* GoogleTest suite (core engine + new agents)
-* Google Benchmark harness + plotting scripts
-* CI across Linux / Windows / macOS + Linux sanitizers (ASan/UBSan)
-* Optional warnings-as-errors builds
+When `latency_enabled = False` (default), behavior is byte-identical to the original deterministic loop — zero overhead.
 
 ---
 
 ## Build & Test
 
-### Configure + build
+### C++ library + CLI + tests
 
 ```bash
 cmake -S . -B build
 cmake --build build
+ctest --test-dir build --output-on-failure
 ```
 
-### Run tests
+### With Python bindings
 
 ```bash
-ctest --test-dir build --output-on-failure
+cmake -S . -B build -DMSIM_BUILD_PYTHON=ON
+cmake --build build --target _msim_core
+pip install -e ".[analysis]"
 ```
 
 ---
 
 ## Run modes
 
-### 1) Offline CLI simulator (CSV outputs)
+### 1) Python strategy interface
+
+```python
+import msim
+
+result = msim.quick_run(
+    msim.agents.HawkesNoiseTrader(owner_id=1),
+    msim.agents.MarketMakerAS(owner_id=2),
+    seed=42, horizon=2.0
+)
+result.summary()
+```
+
+### 2) Offline CLI simulator (CSV outputs)
 
 ```bash
 # args: <seed> <horizon_seconds>
 ./build/msim_cli 1 2.0
 ```
 
-Outputs:
-
-* `trades.csv` — trade prints (id, timestamp, price, qty, maker/taker ids)
-* `top.csv` — top-of-book evolution (timestamp, best bid/ask, mid)
-
-### 2) Extended run with all four additions
-
-```bash
-./build/run_extended
-```
-
-Outputs:
-
-* `trades_extended.csv` — all trade prints
-* `tops_extended.csv` — top-of-book evolution
-* `fv_signals.csv` — FundamentalValueAgent private signal log (if `record_fv_signals = true`)
-* `stylized_facts.csv` — one-row summary for batch experiments
+Outputs: `trades.csv`, `top.csv`
 
 ### 3) Live exchange gateway (local web UI)
 
@@ -352,7 +518,7 @@ Open `http://localhost:8080`. To stop cleanly, type `quit` in the terminal.
 python tools/plot_bench_suite.py bench.json docs
 ```
 
-### Run dedicated latency plot (Release)
+### Run dedicated latency plot
 
 ```bash
 python tools/plot_latency.py bench.json docs/latency_benchmark.png --prefix BM_ProcessMarketOrder
@@ -363,47 +529,65 @@ python tools/plot_latency.py bench.json docs/latency_benchmark.png --prefix BM_P
 ## Project structure
 
 ```text
-include/msim/                   # public headers
-  agents/                       # agent interfaces + implementations
+include/msim/
+  agents/
     noise_trader.hpp
     market_maker.hpp
-    fundamental_value_agent.hpp # NEW: Glosten-Milgrom informed trader
-    momentum_agent.hpp          # NEW: MACD trend-follower
-  latency_model.hpp             # NEW: per-agent latency distributions
-  stylized_facts.hpp            # NEW: stylized facts measurer
-  world.hpp                     # World + IAgent + LatencyActionBuffer
-src/                            # implementations (engine, world, gateway)
-tests/                          # gtests + benchmarks
-tools/                          # benchmark plotting scripts
-web/                            # browser UI served by gateway
-docs/                           # generated benchmark plots + summaries
-.github/workflows/              # CI
+    fundamental_value_agent.hpp     # Glosten-Milgrom informed trader
+    momentum_agent.hpp              # MACD trend-follower
+    noise_trader_hawkes.hpp         # Hawkes self-exciting noise trader
+    market_maker_as.hpp             # Avellaneda-Stoikov optimal MM
+    multi_asset_fv_agent.hpp        # Correlated multi-asset informed trader
+    vwap_agent.hpp                  # VWAP execution agent
+    twap_agent.hpp                  # TWAP execution agent
+    is_agent.hpp                    # Almgren-Chriss IS agent
+    queue_aware_market_maker.hpp    # MM with queue-position cancel logic
+  hawkes_process.hpp                # Hawkes process primitive
+  shared_fundamental.hpp            # Correlated OU signal (multi-asset)
+  tca.hpp                           # FillRecord, StepSnapshot, AgentTCA
+  world.hpp                         # World, IAgent, QueuePosition, CapacityHints
+  latency_model.hpp                 # Per-agent latency distributions
+  stylized_facts.hpp                # Stylized facts measurer
+  book.hpp                          # OrderBook with reserve() and queue_info()
+src/
+  world.cpp                         # Run loop, TCA, queue tracking, perf reserves
+  book.cpp                          # OrderBook incl. queue_info() implementation
+  python/
+    msim_py.cpp                     # pybind11 bindings
+pyproject.toml                      # Python package (scikit-build-core)
+python/
+  msim/
+    __init__.py                     # Public Python API
+    analysis.py                     # TCA analysis helpers, dashboard
+    execution.py                    # IS computation, compare_strategies
+    scenario.py                     # ScenarioRunner, metric extractors
+    scenario_perf.py                # fast_config, sweep_config, benchmark
+  examples/
+    quickstart.py
+    exec_quickstart.py
+    scenario_quickstart.py
+tests/                              # GoogleTest suite + benchmarks
+tools/                              # Benchmark plotting scripts
+web/                                # Browser UI served by gateway
+docs/                               # Generated benchmark plots + summaries
+.github/workflows/                  # CI (Linux sanitizers, macOS Debug/Release)
 ```
 
 ---
 
 ## Roadmap (next)
 
-1. **Zero-allocation depth snapshots (L2)**
-   We will add `OrderBook::depth_into(side, levels, out_vec)` so the gateway reuses the same vector instead of allocating every poll.
-   Files: `include/msim/book.hpp`, `src/book.cpp`, `src/gateway_main.cpp`, `web/app.js`
+1. **Unit tests for new agents and TCA layer**
+   Structured tests for `HawkesNoiseTrader`, `MarketMakerAS`, `VWAPAgent`, `ISAgent`, and the TCA computation pipeline. Files: `tests/`.
 
-2. **Pre-reserve + stabilize hash map behaviour**
-   `loc_` in `OrderBook` and `order_meta_/accounts_` in `World`: call `reserve()` + set `max_load_factor()` to reduce rehash jitter.
-   Files: `src/book.cpp`, `src/world.cpp`
+2. **Gymnasium wrapper for RL research**
+   Wrap `World` as a `gym.Env` so RL agents (PPO, SAC) can train against MSIM. The deterministic seeding makes this directly comparable across runs. Files: `python/msim/gym_env.py`.
 
-3. **Replace `std::map` levels with cache-friendlier levels**
-   Switch price levels to a `flat_map` (or sorted `std::vector` of levels) for fewer cache misses.
-   Files: `include/msim/book.hpp`, `src/book.cpp`
+3. **Fuzz testing the matching engine**
+   LibFuzzer target covering the auction uncrossing, FOK atomicity, and circuit breaker transition edge cases. Files: `tests/fuzz_engine.cpp`.
 
-4. **Replace per-level `std::list<Order>` with a contiguous FIFO**
-   E.g. an intrusive queue or deque/ring structure (still FIFO per price).
-   Files: `include/msim/book.hpp`, `src/book.cpp`
+4. **Replace `std::map` price levels with a sorted `std::vector`**
+   For a typical LOB with < 200 active price levels, a cache-resident sorted vector beats pointer-chasing through a red-black tree. Files: `include/msim/book.hpp`, `src/book.cpp`.
 
-5. **Stylized facts calibration loop**
-   Add a CLI flag to run N independent seeds and output a CSV table of stylized fact scores per seed, enabling automated calibration of agent parameters to empirical targets.
-   Files: `src/msim_cli.cpp`, `include/msim/stylized_facts.hpp`
-
-6. **Benchmark methodology hardening**
-   Pin benchmark thread/core (optional), print CPU info + compiler flags, store in `docs/`.
-   Files: `tests/bench_engine.cpp`, new `docs/benchmark_methodology.md`
+5. **Replace per-level `std::list<Order>` with a contiguous FIFO**
+   Eliminates one heap allocation per resting order. Files: `include/msim/book.hpp`, `src/book.cpp`.
