@@ -27,60 +27,28 @@ struct MarketView {
   std::optional<Price> mid{};
   std::optional<Price> last_trade{};
 
-  // Top-of-book quantities and derived imbalance.
-  // imbalance = (bid_qty - ask_qty) / (bid_qty + ask_qty), in [-1, 1].
   Qty    bid_depth = 0;
   Qty    ask_depth = 0;
   double imbalance = 0.0;
 };
 
 // ─── QueuePosition ────────────────────────────────────────────────────────────
-// Describes where one of an agent's resting limit orders sits in the book.
-// Delivered inside AgentState::queue_positions every step.
-//
-// The key fields for strategy decisions:
-//
-//   qty_ahead       — lots that must fill before this order is reached.
-//                     0 = this order is at the front of the queue (next to fill).
-//
-//   qty_behind      — lots resting behind this order at the same price.
-//                     A large qty_behind means the level has staying power;
-//                     a small one means the level will disappear if hit.
-//
-//   level_total     — total qty at this price = qty_ahead + own_qty + qty_behind.
-//
-//   own_qty         — remaining quantity of this order.
-//
-//   position_index  — 0-based FIFO index.  0 = next to fill.
-//
-// Example decision rule for a market maker:
-//   if (qp.qty_ahead == 0 && spread_narrowing)
-//       cancel_and_requote_further();   // at front, about to be adversely selected
-//   if (qp.qty_ahead > 2 * avg_trade_size)
-//       relax();                        // deep in queue, unlikely to fill soon
 struct QueuePosition {
   OrderId order_id{};
   Price   price{};
   Side    side{};
-  Qty     qty_ahead{};        // lots ahead in queue
-  Qty     qty_behind{};       // lots behind in queue
-  Qty     level_total{};      // total qty at this price level
-  Qty     own_qty{};          // remaining qty of this order
-  int     position_index{};   // 0-based FIFO position
+  Qty     qty_ahead{};
+  Qty     qty_behind{};
+  Qty     level_total{};
+  Qty     own_qty{};
+  int     position_index{};
 };
 
 // ─── AgentState ───────────────────────────────────────────────────────────────
-// Extended with queue_positions: one entry per resting GTC limit order
-// this agent currently has in the book.  Empty if the agent has no resting
-// orders, or if WorldConfig::track_queue_positions = false.
 struct AgentState {
   OwnerId owner{};
   int64_t cash_ticks{0};
   int64_t position{0};
-
-  // Queue positions for all resting GTC limit orders owned by this agent.
-  // Populated each step before agent.step() is called.
-  // Empty when track_queue_positions = false (default: true).
   std::vector<QueuePosition> queue_positions;
 };
 
@@ -178,26 +146,28 @@ public:
 struct WorldConfig {
   Ts dt_ns{1'000'000};
 
-  // Latency model
   bool latency_enabled{false};
   std::vector<LatencyDistConfig> latency_configs;
 
-  // Stylized facts
   bool compute_stylized_facts{true};
   bool record_fv_signals{false};
 
-  // TCA output
   bool record_fills{true};
   bool record_pnl_series{true};
 
-  // Queue position tracking.
-  // When true, AgentState::queue_positions is populated each step for
-  // every agent that has resting GTC limit orders in the book.
-  // Cost: O(k) per resting limit order per step, where k = position_index.
-  // For strategies with O(2-4) resting orders this is negligible.
-  // Set to false for scenarios where you never inspect queue positions
-  // (e.g. pure market-order strategies) to avoid the overhead.
   bool track_queue_positions{true};
+
+  // ── Performance hints ─────────────────────────────────────────────────────
+  // Expected peak number of simultaneously resting orders.
+  // Used to pre-reserve the order_meta_ and arrival_info_ hashmaps at the
+  // start of run(), eliminating rehash spikes in p99 latency.
+  // 0 = use a conservative default (256).
+  std::size_t expected_resting_orders{0};
+
+  // Expected number of fills (trades) for the whole run.
+  // Used to pre-reserve out.trades and out.fills.
+  // 0 = estimate from horizon / dt_ns.
+  std::size_t expected_fills{0};
 };
 
 // ─── FVLogEntry ───────────────────────────────────────────────────────────────
@@ -253,11 +223,7 @@ private:
                       StylizedFactsMeasurer& sfm,
                       const WorldConfig& cfg);
 
-  // Build queue positions for one agent from active_limits_.
-  // Fills AgentState::queue_positions and prunes stale entries from
-  // active_limits_[oid] (orders that have been fully filled since last step).
-  void build_queue_positions(OwnerId oid,
-                             AgentState& state);
+  void build_queue_positions(OwnerId oid, AgentState& state);
 
   MatchingEngine engine_;
   std::vector<std::unique_ptr<IAgent>>   agents_;
@@ -265,21 +231,33 @@ private:
   std::unordered_map<OwnerId, Account>   accounts_;
   std::vector<LatencySampler>            latency_samplers_;
 
-  // TCA tracking state
-  std::unordered_map<OrderId, ArrivalInfo> arrival_info_;
-  std::unordered_map<OwnerId, int64_t>     n_limit_submitted_;
-  std::unordered_map<OwnerId, int64_t>     n_market_submitted_;
-  std::unordered_map<OwnerId, int64_t>     n_cancels_sent_;
+  std::unordered_map<OrderId, ArrivalInfo>           arrival_info_;
+  std::unordered_map<OwnerId, int64_t>               n_limit_submitted_;
+  std::unordered_map<OwnerId, int64_t>               n_market_submitted_;
+  std::unordered_map<OwnerId, int64_t>               n_cancels_sent_;
+  std::unordered_map<OwnerId, std::vector<OrderId>>  active_limits_;
+  std::unordered_map<OrderId, Price>                 order_price_cache_;
 
-  // Queue position tracking: active GTC limit order IDs per owner.
-  // Entries are added when a GTC limit is accepted into the book and
-  // lazily pruned when queue_info() returns found=false (order filled).
-  std::unordered_map<OwnerId, std::vector<OrderId>> active_limits_;
+  // ── Reusable buffers (allocated once, reused across every step) ───────────
+  // These eliminate per-step heap allocations on the hot path.
 
-  // Cache of limit order prices (OrderId → Price) so build_queue_positions()
-  // can populate QueuePosition::price without re-querying the book.
-  // Entries are erased on cancel and lazily on fill (via active_limits_ pruning).
-  std::unordered_map<OrderId, Price> order_price_cache_;
+  // depth_bid_buf_ / depth_ask_buf_:
+  //   Used by compute_imbalance() instead of allocating a new vector each call.
+  //   Saves ~2 heap allocs per step (one per side) = ~2M allocs in a 1000-seed
+  //   sweep of 1000 steps each.
+  mutable std::vector<LevelSummary> depth_bid_buf_;
+  mutable std::vector<LevelSummary> depth_ask_buf_;
+
+  // actions_buf_:
+  //   Reused for each agent's step() call instead of constructing a new
+  //   vector per agent per step.  Capacity grows to the max ever seen and
+  //   then never allocates again.
+  std::vector<Action> actions_buf_;
+
+  // still_active_buf_:
+  //   Reused inside build_queue_positions() to avoid allocating the
+  //   "still-active" working set each step for agents with resting orders.
+  std::vector<OrderId> still_active_buf_;
 };
 
 } // namespace msim
