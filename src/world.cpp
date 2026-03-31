@@ -23,8 +23,8 @@ uint64_t World::splitmix64(uint64_t& x) noexcept {
 // ---------------------------------------------------------------------------
 // compute_imbalance
 //
-// PERF: uses depth_into() with pre-allocated member buffers instead of
-//       depth(), eliminating two heap allocations per step.
+// PERF: assigns into member buffers so vector capacity is reused across
+//       steps — no heap allocation after the first call.
 // ---------------------------------------------------------------------------
 double World::compute_imbalance(Qty& bid_depth_out,
                                 Qty& ask_depth_out) const noexcept
@@ -32,8 +32,8 @@ double World::compute_imbalance(Qty& bid_depth_out,
   bid_depth_out = 0;
   ask_depth_out = 0;
 
-  engine_.book().depth_into(Side::Buy,  1, depth_bid_buf_);
-  engine_.book().depth_into(Side::Sell, 1, depth_ask_buf_);
+  depth_bid_buf_ = engine_.book().depth(Side::Buy,  1);
+  depth_ask_buf_ = engine_.book().depth(Side::Sell, 1);
 
   if (depth_bid_buf_.empty() || depth_ask_buf_.empty()) return 0.0;
 
@@ -245,25 +245,16 @@ WorldResult World::run(uint64_t seed,
   //
   // max_load_factor(0.5): halves collision rate vs the default 1.0.
   // The memory cost is 2× vs the default — acceptable for simulation.
-  //
-  // Sizing rationale:
-  //   order_meta_ / arrival_info_ / order_price_cache_:
-  //     Peak simultaneous resting orders.  A typical MM quotes 2 resting
-  //     orders; 3 noise traders submit ~1 each; ~8 resting at any time.
-  //     Use the hint or a conservative default of 256.
-  //   accounts_ / active_limits_ / n_*:
-  //     One entry per agent — tiny.
 
   const std::size_t n_agents = agents_.size();
 
-  // Per-order maps — use hint or default
   const std::size_t peak_orders = (cfg.expected_resting_orders > 0)
       ? cfg.expected_resting_orders
       : std::max(std::size_t{256}, n_agents * 8);
 
   order_meta_.clear();
   order_meta_.max_load_factor(0.5f);
-  order_meta_.reserve(peak_orders * 4);   // *4 because orders rotate through
+  order_meta_.reserve(peak_orders * 4);
 
   arrival_info_.clear();
   arrival_info_.max_load_factor(0.5f);
@@ -273,7 +264,6 @@ WorldResult World::run(uint64_t seed,
   order_price_cache_.max_load_factor(0.5f);
   order_price_cache_.reserve(peak_orders * 2);
 
-  // Per-agent maps — small, but still worth reserving
   accounts_.max_load_factor(0.5f);
   accounts_.reserve((n_agents + 1) * 2);
 
@@ -296,29 +286,25 @@ WorldResult World::run(uint64_t seed,
   // ── 4. Pre-reserve result vectors ─────────────────────────────────────────
   //
   // PERF: avoids reallocation during the run loop.  out.tops is sized
-  //       exactly (one entry per step).  out.trades and out.fills use the
-  //       hint or a ~5% fill rate estimate.
+  //       exactly (one entry per step).
 
   out.tops.reserve(n_steps);
 
   const std::size_t est_fills = (cfg.expected_fills > 0)
       ? cfg.expected_fills
-      : n_steps / 20;   // rough: one fill per 20 steps per agent
+      : n_steps / 20;
 
   out.trades.reserve(est_fills);
 
   if (cfg.record_fills)
-    out.fills.reserve(est_fills * 2);   // two FillRecords per trade
+    out.fills.reserve(est_fills * 2);
 
   if (cfg.record_pnl_series)
     out.pnl_series.reserve(n_steps * n_agents);
 
-  // Pre-reserve depth buffers (capacity 1 is enough; just avoids the
-  // first-call allocation)
+  // Pre-reserve member scratch buffers
   depth_bid_buf_.reserve(1);
   depth_ask_buf_.reserve(1);
-
-  // Pre-reserve the actions reuse buffer
   actions_buf_.reserve(8);
 
   // ── 5. Stylized facts measurer and latency buffer ─────────────────────────
