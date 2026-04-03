@@ -1,6 +1,22 @@
 #pragma once
 // ============================================================
 // include/msim/world.hpp
+//
+// Performance changes vs previous version:
+//   1. active_limits_: vector<OrderId> → unordered_set<OrderId>
+//      Cancel cleanup: O(N) linear scan → O(1) set erase.
+//      build_queue_positions: erase-in-place during iteration,
+//      still_active_buf_ member removed (no longer needed).
+//
+//   2. proc_result_buf_: pre-allocated ProcessResult member.
+//      engine_.process_into(o, proc_result_buf_) reuses the
+//      internal trades vector across calls, eliminating one
+//      heap allocation per order that generates trades.
+//      Requires process_into() in matching_engine.hpp/.cpp.
+//
+//   3. depth_bid_buf_ / depth_ask_buf_ removed.
+//      compute_imbalance() now uses best_bid_qty()/best_ask_qty()
+//      which are O(1) — no vector needed at all.
 // ============================================================
 
 #include <algorithm>
@@ -8,6 +24,7 @@
 #include <memory>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "msim/matching_engine.hpp"
@@ -123,8 +140,8 @@ public:
     return pending_;
   }
 
-  void   clear()               noexcept { pending_.clear(); }
-  size_t size()  const noexcept { return pending_.size(); }
+  void   clear()              noexcept { pending_.clear(); }
+  size_t size() const noexcept { return pending_.size(); }
 
 private:
   std::vector<PendingAction> pending_;
@@ -157,16 +174,7 @@ struct WorldConfig {
 
   bool track_queue_positions{true};
 
-  // ── Performance hints ─────────────────────────────────────────────────────
-  // Expected peak number of simultaneously resting orders.
-  // Used to pre-reserve the order_meta_ and arrival_info_ hashmaps at the
-  // start of run(), eliminating rehash spikes in p99 latency.
-  // 0 = use a conservative default (256).
   std::size_t expected_resting_orders{0};
-
-  // Expected number of fills (trades) for the whole run.
-  // Used to pre-reserve out.trades and out.fills.
-  // 0 = estimate from horizon / dt_ns.
   std::size_t expected_fills{0};
 };
 
@@ -231,33 +239,24 @@ private:
   std::unordered_map<OwnerId, Account>   accounts_;
   std::vector<LatencySampler>            latency_samplers_;
 
-  std::unordered_map<OrderId, ArrivalInfo>           arrival_info_;
-  std::unordered_map<OwnerId, int64_t>               n_limit_submitted_;
-  std::unordered_map<OwnerId, int64_t>               n_market_submitted_;
-  std::unordered_map<OwnerId, int64_t>               n_cancels_sent_;
-  std::unordered_map<OwnerId, std::vector<OrderId>>  active_limits_;
-  std::unordered_map<OrderId, Price>                 order_price_cache_;
+  std::unordered_map<OrderId, ArrivalInfo>          arrival_info_;
+  std::unordered_map<OwnerId, int64_t>              n_limit_submitted_;
+  std::unordered_map<OwnerId, int64_t>              n_market_submitted_;
+  std::unordered_map<OwnerId, int64_t>              n_cancels_sent_;
+  std::unordered_map<OrderId, Price>                order_price_cache_;
 
-  // ── Reusable buffers (allocated once, reused across every step) ───────────
-  // These eliminate per-step heap allocations on the hot path.
+  // active_limits_: unordered_set (was vector) → O(1) erase on cancel,
+  // O(1) erase-during-iteration in build_queue_positions.
+  std::unordered_map<OwnerId, std::unordered_set<OrderId>> active_limits_;
 
-  // depth_bid_buf_ / depth_ask_buf_:
-  //   Used by compute_imbalance() instead of allocating a new vector each call.
-  //   Saves ~2 heap allocs per step (one per side) = ~2M allocs in a 1000-seed
-  //   sweep of 1000 steps each.
-  mutable std::vector<LevelSummary> depth_bid_buf_;
-  mutable std::vector<LevelSummary> depth_ask_buf_;
+  // proc_result_buf_: reused across every engine_.process_into() call.
+  // The trades vector inside retains its capacity between calls, eliminating
+  // the heap allocation that occurred on every order that generated trades.
+  ProcessResult proc_result_buf_;
 
-  // actions_buf_:
-  //   Reused for each agent's step() call instead of constructing a new
-  //   vector per agent per step.  Capacity grows to the max ever seen and
-  //   then never allocates again.
+  // actions_buf_: reused across every agent step().
   std::vector<Action> actions_buf_;
-
-  // still_active_buf_:
-  //   Reused inside build_queue_positions() to avoid allocating the
-  //   "still-active" working set each step for agents with resting orders.
-  std::vector<OrderId> still_active_buf_;
+  // still_active_buf_ removed — no longer needed with unordered_set.
 };
 
 } // namespace msim
