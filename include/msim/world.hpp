@@ -252,7 +252,7 @@ private:
   // proc_result_buf_: reused across every engine_.process_into() call.
   // The trades vector inside retains its capacity between calls, eliminating
   // the heap allocation that occurred on every order that generated trades.
-  ProcessResult proc_result_buf_;
+  MatchResult proc_result_buf_;
 
   // actions_buf_: reused across every agent step().
   std::vector<Action> actions_buf_;
