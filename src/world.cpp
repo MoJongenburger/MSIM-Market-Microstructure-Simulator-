@@ -1,5 +1,25 @@
 // ============================================================
 // src/world.cpp
+//
+// Performance changes vs previous version:
+//
+//   1. compute_imbalance() uses best_bid_qty()/best_ask_qty().
+//      Replaces depth(1) calls that constructed a temporary
+//      vector<LevelSummary> every step. Now pure O(1).
+//      depth_bid_buf_ / depth_ask_buf_ members removed.
+//
+//   2. build_queue_positions() iterates unordered_set directly.
+//      Erases stale entries in-place (unordered_set::erase by iterator
+//      is O(1) and safe during range-for).
+//      still_active_buf_ pattern removed entirely.
+//
+//   3. Cancel path: vector scan → set erase.
+//      active_limits_[oid].erase(act.id) is O(1) vs the previous
+//      O(N) erase-remove over a vector.
+//
+//   4. engine_.process_into(o, proc_result_buf_) reuses the
+//      internal Trade vector across calls.  Requires process_into()
+//      to be added to MatchingEngine — see matching_engine snippet.
 // ============================================================
 #include "msim/world.hpp"
 #include "msim/agents/fundamental_value_agent.hpp"
@@ -23,22 +43,17 @@ uint64_t World::splitmix64(uint64_t& x) noexcept {
 // ---------------------------------------------------------------------------
 // compute_imbalance
 //
-// PERF: assigns into member buffers so vector capacity is reused across
-//       steps — no heap allocation after the first call.
+// PERF: replaces depth(Side::Buy, 1) / depth(Side::Sell, 1).
+// Those calls constructed a temporary vector<LevelSummary> just to
+// read total_qty from the first entry. With FlatPriceMap, the best
+// level is always entries_.front() — best_bid_qty()/best_ask_qty()
+// are a single pointer dereference. Zero allocations.
 // ---------------------------------------------------------------------------
 double World::compute_imbalance(Qty& bid_depth_out,
                                 Qty& ask_depth_out) const noexcept
 {
-  bid_depth_out = 0;
-  ask_depth_out = 0;
-
-  depth_bid_buf_ = engine_.book().depth(Side::Buy,  1);
-  depth_ask_buf_ = engine_.book().depth(Side::Sell, 1);
-
-  if (depth_bid_buf_.empty() || depth_ask_buf_.empty()) return 0.0;
-
-  bid_depth_out = depth_bid_buf_[0].total_qty;
-  ask_depth_out = depth_ask_buf_[0].total_qty;
+  bid_depth_out = engine_.book().best_bid_qty();
+  ask_depth_out = engine_.book().best_ask_qty();
 
   const double bd    = static_cast<double>(bid_depth_out);
   const double ad    = static_cast<double>(ask_depth_out);
@@ -49,8 +64,10 @@ double World::compute_imbalance(Qty& bid_depth_out,
 // ---------------------------------------------------------------------------
 // build_queue_positions
 //
-// PERF: uses still_active_buf_ (member) instead of allocating a local
-//       vector each call.  Capacity grows to peak and then stays there.
+// PERF: active_limits_[oid] is now unordered_set<OrderId>.
+// Stale entries (filled orders) are erased in-place during iteration
+// using the iterator returned by unordered_set::erase — O(1) per erase,
+// no secondary buffer needed.
 // ---------------------------------------------------------------------------
 void World::build_queue_positions(OwnerId oid, AgentState& state)
 {
@@ -59,23 +76,24 @@ void World::build_queue_positions(OwnerId oid, AgentState& state)
   auto& ids = active_limits_[oid];
   if (ids.empty()) return;
 
-  still_active_buf_.clear();
-  still_active_buf_.reserve(ids.size());
-
-  for (const OrderId order_id : ids) {
+  for (auto it = ids.begin(); it != ids.end(); ) {
+    const OrderId order_id = *it;
     const QueueInfo qi = engine_.book().queue_info(order_id);
-    if (!qi.found) continue;
 
-    still_active_buf_.push_back(order_id);
+    if (!qi.found) {
+      it = ids.erase(it);   // O(1): order fully filled, remove from set
+      continue;
+    }
+    ++it;
 
     Side side = Side::Buy;
-    if (auto it = order_meta_.find(order_id); it != order_meta_.end())
-      side = it->second.side;
+    if (auto mit = order_meta_.find(order_id); mit != order_meta_.end())
+      side = mit->second.side;
 
     Price price = 0;
-    if (auto it = order_price_cache_.find(order_id);
-        it != order_price_cache_.end())
-      price = it->second;
+    if (auto pit = order_price_cache_.find(order_id);
+        pit != order_price_cache_.end())
+      price = pit->second;
 
     QueuePosition qp{};
     qp.order_id       = order_id;
@@ -88,8 +106,6 @@ void World::build_queue_positions(OwnerId oid, AgentState& state)
     qp.position_index = qi.position_index;
     state.queue_positions.push_back(qp);
   }
-
-  ids = std::move(still_active_buf_);
 }
 
 // ---------------------------------------------------------------------------
@@ -120,27 +136,31 @@ void World::process_action(Ts ts,
     if (is_limit)
       order_price_cache_[o.id] = o.price;
 
-    auto res = engine_.process(o);
+    // PERF: process_into() reuses proc_result_buf_.trades capacity.
+    // For orders that generate N trades, this avoids one malloc of
+    // N * sizeof(Trade) bytes that would otherwise occur on every call.
+    engine_.process_into(o, proc_result_buf_);
 
     if (is_limit && o.tif == TimeInForce::GTC && cfg.track_queue_positions) {
       const QueueInfo qi = engine_.book().queue_info(o.id);
       if (qi.found)
-        active_limits_[oid].push_back(o.id);
+        active_limits_[oid].insert(o.id);   // O(1): set insert
     }
 
-    if (!res.trades.empty()) {
+    if (!proc_result_buf_.trades.empty()) {
       out.trades.insert(out.trades.end(),
-                        res.trades.begin(), res.trades.end());
+                        proc_result_buf_.trades.begin(),
+                        proc_result_buf_.trades.end());
 
       const auto bb2  = engine_.book().best_bid();
       const auto ba2  = engine_.book().best_ask();
       const auto mid2 = midprice(bb2, ba2);
-      apply_trades_to_accounts(ts, res.trades, order_meta_,
+      apply_trades_to_accounts(ts, proc_result_buf_.trades, order_meta_,
                                 accounts_, mid2);
 
       const Price cur_mid2 = mid2 ? *mid2 : Price{0};
 
-      for (const auto& tr : res.trades) {
+      for (const auto& tr : proc_result_buf_.trades) {
         Side aggressor = Side::Buy;
         if (auto it = order_meta_.find(tr.taker_order_id);
             it != order_meta_.end())
@@ -191,8 +211,9 @@ void World::process_action(Ts ts,
       arrival_info_.erase(act.id);
       order_price_cache_.erase(act.id);
       n_cancels_sent_[oid]++;
-      auto& ids = active_limits_[oid];
-      ids.erase(std::remove(ids.begin(), ids.end(), act.id), ids.end());
+
+      // PERF: O(1) set erase — was O(N) erase-remove over a vector.
+      active_limits_[oid].erase(act.id);
     }
 
   } else {
@@ -238,14 +259,6 @@ WorldResult World::run(uint64_t seed,
   }
 
   // ── 3. Reset + pre-reserve all hash maps ──────────────────────────────────
-  //
-  // PERF: reserve() + max_load_factor(0.5) together guarantee that the maps
-  //       never rehash during the simulation, removing the p99 spikes that
-  //       appear in unsaturated hash tables.
-  //
-  // max_load_factor(0.5): halves collision rate vs the default 1.0.
-  // The memory cost is 2× vs the default — acceptable for simulation.
-
   const std::size_t n_agents = agents_.size();
 
   const std::size_t peak_orders = (cfg.expected_resting_orders > 0)
@@ -283,11 +296,12 @@ WorldResult World::run(uint64_t seed,
   n_cancels_sent_.max_load_factor(0.5f);
   n_cancels_sent_.reserve((n_agents + 1) * 2);
 
-  // ── 4. Pre-reserve result vectors ─────────────────────────────────────────
-  //
-  // PERF: avoids reallocation during the run loop.  out.tops is sized
-  //       exactly (one entry per step).
+  // PERF: clear proc_result_buf_ trades but retain capacity.
+  // The vector will grow to the max trades-per-order seen and
+  // then never allocate again for the rest of the run.
+  proc_result_buf_.trades.clear();
 
+  // ── 4. Pre-reserve result vectors ─────────────────────────────────────────
   out.tops.reserve(n_steps);
 
   const std::size_t est_fills = (cfg.expected_fills > 0)
@@ -302,9 +316,6 @@ WorldResult World::run(uint64_t seed,
   if (cfg.record_pnl_series)
     out.pnl_series.reserve(n_steps * n_agents);
 
-  // Pre-reserve member scratch buffers
-  depth_bid_buf_.reserve(1);
-  depth_ask_buf_.reserve(1);
   actions_buf_.reserve(8);
 
   // ── 5. Stylized facts measurer and latency buffer ─────────────────────────
@@ -314,7 +325,7 @@ WorldResult World::run(uint64_t seed,
   // ── Main simulation loop ─────────────────────────────────────────────────
   for (Ts ts = t0; ts <= t_end; ts += cfg.dt_ns) {
 
-    // A. Flush timed events (auction uncrossings, phase transitions)
+    // A. Flush timed events
     {
       auto flushed = engine_.flush(ts);
       if (!flushed.empty()) {
@@ -373,7 +384,6 @@ WorldResult World::run(uint64_t seed,
       if (cfg.track_queue_positions)
         build_queue_positions(oid, self);
 
-      // PERF: reuse actions_buf_ — capacity retained between calls.
       actions_buf_.clear();
       ap->step(ts, view, self, actions_buf_);
 
@@ -398,7 +408,7 @@ WorldResult World::run(uint64_t seed,
                        pa.arrival_mid, out, sfm, cfg);
     }
 
-    // F. Snapshot top-of-book (no allocation — reserved above)
+    // F. Snapshot top-of-book
     {
       BookTop top{};
       top.ts       = ts;
@@ -408,7 +418,7 @@ WorldResult World::run(uint64_t seed,
       out.tops.push_back(top);
     }
 
-    // G. Record per-agent PnL snapshot (no allocation — reserved above)
+    // G. Record per-agent PnL snapshot
     if (cfg.record_pnl_series) {
       const Price snap_mid = mid ? *mid : Price{0};
       for (const auto& ap : agents_) {
@@ -427,7 +437,7 @@ WorldResult World::run(uint64_t seed,
     }
   }
 
-  // ── 6. Final account snapshots + TCA ──────────────────────────────────────
+  // ── Final account snapshots + TCA ─────────────────────────────────────────
   {
     const auto bb  = engine_.book().best_bid();
     const auto ba  = engine_.book().best_ask();
@@ -457,7 +467,6 @@ WorldResult World::run(uint64_t seed,
     }
   }
 
-  // ── 7. Stylized facts ──────────────────────────────────────────────────────
   if (cfg.compute_stylized_facts && sfm.n_trades() >= 10)
     out.sf = sfm.compute();
 
