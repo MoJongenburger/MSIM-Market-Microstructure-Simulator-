@@ -2,6 +2,10 @@
 // src/python/msim_py.cpp
 // ============================================================
 
+// Must come before any include that pulls in <cmath> on MSVC,
+// otherwise M_PI is undefined (Windows does not expose it by default).
+#define _USE_MATH_DEFINES
+
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/functional.h>
@@ -125,18 +129,6 @@ PYBIND11_MODULE(_msim_core, m) {
 
     py::class_<Order>(m, "Order", R"pbdoc(
         A single order submitted to the matching engine.
-
-        Attributes
-        ----------
-        id        : int
-        owner     : int
-        side      : Side
-        type      : OrderType
-        price     : int         — limit price in ticks (ignored for Market)
-        qty       : int
-        ts        : int         — nanoseconds (World overwrites this)
-        tif       : TimeInForce
-        mkt_style : MarketStyle
     )pbdoc")
         .def(py::init<>())
         .def_readwrite("id",        &Order::id)
@@ -157,13 +149,7 @@ PYBIND11_MODULE(_msim_core, m) {
 
     // ── Trade ────────────────────────────────────────────────────────────────
 
-    py::class_<Trade>(m, "Trade", R"pbdoc(
-        A completed trade (fill).
-
-        Attributes
-        ----------
-        id, ts, price, qty, maker_order_id, taker_order_id
-    )pbdoc")
+    py::class_<Trade>(m, "Trade")
         .def(py::init<>())
         .def_readwrite("id",             &Trade::id)
         .def_readwrite("ts",             &Trade::ts)
@@ -179,7 +165,7 @@ PYBIND11_MODULE(_msim_core, m) {
 
     // ── BookTop ──────────────────────────────────────────────────────────────
 
-    py::class_<BookTop>(m, "BookTop", "Top-of-book snapshot at one timestamp.")
+    py::class_<BookTop>(m, "BookTop")
         .def(py::init<>())
         .def_readwrite("ts", &BookTop::ts)
         .def_property_readonly("best_bid",
@@ -187,17 +173,11 @@ PYBIND11_MODULE(_msim_core, m) {
         .def_property_readonly("best_ask",
             [](const BookTop& b) { return opt_to_py(b.best_ask); })
         .def_property_readonly("mid",
-            [](const BookTop& b) { return opt_to_py(b.mid); })
-        .def("__repr__", [](const BookTop& b) {
-            std::string s = "<BookTop ts=" + std::to_string(b.ts);
-            if (b.best_bid) s += " bid=" + std::to_string(*b.best_bid);
-            if (b.best_ask) s += " ask=" + std::to_string(*b.best_ask);
-            return s + ">";
-        });
+            [](const BookTop& b) { return opt_to_py(b.mid); });
 
     // ── LevelSummary ─────────────────────────────────────────────────────────
 
-    py::class_<LevelSummary>(m, "LevelSummary", "One price level in an L2 snapshot.")
+    py::class_<LevelSummary>(m, "LevelSummary")
         .def(py::init<>())
         .def_readwrite("price",       &LevelSummary::price)
         .def_readwrite("total_qty",   &LevelSummary::total_qty)
@@ -205,20 +185,7 @@ PYBIND11_MODULE(_msim_core, m) {
 
     // ── MarketView ───────────────────────────────────────────────────────────
 
-    py::class_<MarketView>(m, "MarketView", R"pbdoc(
-        Read-only snapshot of market state delivered to each agent every step.
-
-        Attributes
-        ----------
-        ts          : int
-        best_bid    : int | None
-        best_ask    : int | None
-        mid         : int | None
-        last_trade  : int | None
-        bid_depth   : int   — quantity at best bid
-        ask_depth   : int   — quantity at best ask
-        imbalance   : float — (bid_qty - ask_qty) / (bid_qty + ask_qty)
-    )pbdoc")
+    py::class_<MarketView>(m, "MarketView")
         .def(py::init<>())
         .def_readwrite("ts",         &MarketView::ts)
         .def_property_readonly("best_bid",
@@ -234,31 +201,16 @@ PYBIND11_MODULE(_msim_core, m) {
         .def_readwrite("imbalance",  &MarketView::imbalance)
         .def("has_quote", [](const MarketView& v) {
             return v.best_bid.has_value() && v.best_ask.has_value();
-        }, "True when both best_bid and best_ask are present.")
+        })
         .def("spread", [](const MarketView& v) -> py::object {
             if (v.best_bid && v.best_ask)
                 return py::int_(*v.best_ask - *v.best_bid);
             return py::none();
-        }, "Bid-ask spread in ticks, or None if book is empty.");
+        });
 
     // ── QueuePosition ────────────────────────────────────────────────────────
 
-    py::class_<QueuePosition>(m, "QueuePosition", R"pbdoc(
-        Queue position for one resting limit order.
-
-        Delivered in AgentState.queue_positions every step.
-
-        Attributes
-        ----------
-        order_id       : int
-        price          : int
-        side           : Side
-        qty_ahead      : int  — lots ahead (must drain before this order fills)
-        qty_behind     : int  — lots behind at the same price
-        level_total    : int  — total qty at this price level
-        own_qty        : int  — remaining qty of this order
-        position_index : int  — 0-based FIFO position (0 = next to fill)
-    )pbdoc")
+    py::class_<QueuePosition>(m, "QueuePosition")
         .def_readwrite("order_id",       &QueuePosition::order_id)
         .def_readwrite("price",          &QueuePosition::price)
         .def_readwrite("side",           &QueuePosition::side)
@@ -269,33 +221,16 @@ PYBIND11_MODULE(_msim_core, m) {
         .def_readwrite("position_index", &QueuePosition::position_index)
         .def("is_front", [](const QueuePosition& qp) {
             return qp.qty_ahead == 0;
-        }, "True when this order is at the front of the queue (next to fill).")
+        })
         .def("queue_fraction", [](const QueuePosition& qp) -> double {
             if (qp.level_total == 0) return 0.0;
             return static_cast<double>(qp.qty_ahead)
                  / static_cast<double>(qp.level_total);
-        }, "Fraction of the level ahead of this order (0 = front, ~1 = deep).")
-        .def("__repr__", [](const QueuePosition& qp) {
-            return "<QueuePosition order=" + std::to_string(qp.order_id)
-                 + " px=" + std::to_string(qp.price)
-                 + " ahead=" + std::to_string(qp.qty_ahead)
-                 + " pos=" + std::to_string(qp.position_index) + ">";
         });
 
     // ── AgentState ───────────────────────────────────────────────────────────
 
-    py::class_<AgentState>(m, "AgentState", R"pbdoc(
-        Per-agent account state and queue positions delivered every step.
-
-        Attributes
-        ----------
-        owner           : int
-        cash_ticks      : int
-        position        : int
-        queue_positions : list[QueuePosition]
-            One entry per resting GTC limit order this agent has in the book.
-            Empty when WorldConfig.track_queue_positions = False.
-    )pbdoc")
+    py::class_<AgentState>(m, "AgentState")
         .def(py::init<>())
         .def_readwrite("owner",           &AgentState::owner)
         .def_readwrite("cash_ticks",      &AgentState::cash_ticks)
@@ -303,23 +238,21 @@ PYBIND11_MODULE(_msim_core, m) {
         .def_readwrite("queue_positions", &AgentState::queue_positions)
         .def("has_resting_orders", [](const AgentState& s) {
             return !s.queue_positions.empty();
-        }, "True when the agent has at least one resting GTC limit order.")
+        })
         .def("resting_bid", [](const AgentState& s) -> py::object {
             for (const auto& qp : s.queue_positions)
                 if (qp.side == Side::Buy) return py::cast(qp);
             return py::none();
-        }, "Return the first resting bid QueuePosition, or None.")
+        })
         .def("resting_ask", [](const AgentState& s) -> py::object {
             for (const auto& qp : s.queue_positions)
                 if (qp.side == Side::Sell) return py::cast(qp);
             return py::none();
-        }, "Return the first resting ask QueuePosition, or None.");
+        });
 
     // ── Action ───────────────────────────────────────────────────────────────
 
-    py::class_<Action>(m, "Action", R"pbdoc(
-        An instruction from an agent to the matching engine.
-    )pbdoc")
+    py::class_<Action>(m, "Action")
         .def(py::init<>())
         .def_readwrite("type",    &Action::type)
         .def_readwrite("order",   &Action::order)
@@ -328,22 +261,11 @@ PYBIND11_MODULE(_msim_core, m) {
         .def_static("submit",     &Action::submit,     py::arg("order"))
         .def_static("cancel",     &Action::cancel,     py::arg("order_id"))
         .def_static("modify_qty", &Action::modify_qty, py::arg("order_id"),
-                    py::arg("new_qty"))
-        .def("__repr__", [](const Action& a) {
-            const char* t = a.type == ActionType::Submit    ? "Submit"
-                          : a.type == ActionType::Cancel    ? "Cancel"
-                                                            : "ModifyQty";
-            return std::string("<Action ") + t + ">";
-        });
+                    py::arg("new_qty"));
 
     // ── IAgent ───────────────────────────────────────────────────────────────
 
-    py::class_<IAgent, PyAgent, std::unique_ptr<IAgent>>(m, "Agent", R"pbdoc(
-        Abstract base class for all MSIM agents.
-
-        Subclass this and implement owner(), seed(), and step().
-        step() must return a list (possibly empty) of Action objects.
-    )pbdoc")
+    py::class_<IAgent, PyAgent, std::unique_ptr<IAgent>>(m, "Agent")
         .def(py::init<>())
         .def("owner", &IAgent::owner)
         .def("seed",  &IAgent::seed, py::arg("s"))
@@ -354,8 +276,7 @@ PYBIND11_MODULE(_msim_core, m) {
 
     // ── FVLogEntry ───────────────────────────────────────────────────────────
 
-    py::class_<FVLogEntry>(m, "FVLogEntry",
-        "Private fundamental value log entry (one per FVAgent per step).")
+    py::class_<FVLogEntry>(m, "FVLogEntry")
         .def_readwrite("ts",    &FVLogEntry::ts)
         .def_readwrite("owner", &FVLogEntry::owner)
         .def_readwrite("V",     &FVLogEntry::V);
@@ -396,9 +317,7 @@ PYBIND11_MODULE(_msim_core, m) {
         .def_readwrite("std_illiq",    &AmihudStats::std_illiq)
         .def_readwrite("illiq_series", &AmihudStats::illiq_series);
 
-    py::class_<StyleFacts>(m, "StyleFacts", R"pbdoc(
-        Computed stylized facts for a completed simulation run.
-    )pbdoc")
+    py::class_<StyleFacts>(m, "StyleFacts")
         .def_readwrite("returns",           &StyleFacts::returns)
         .def_readwrite("autocorr",          &StyleFacts::autocorr)
         .def_readwrite("impact",            &StyleFacts::impact)
@@ -418,8 +337,7 @@ PYBIND11_MODULE(_msim_core, m) {
 
     // ── AccountSnapshot ───────────────────────────────────────────────────────
 
-    py::class_<AccountSnapshot>(m, "AccountSnapshot",
-        "Final mark-to-market account state for one agent.")
+    py::class_<AccountSnapshot>(m, "AccountSnapshot")
         .def_readwrite("owner",      &AccountSnapshot::owner)
         .def_readwrite("cash_ticks", &AccountSnapshot::cash_ticks)
         .def_readwrite("position",   &AccountSnapshot::position);
@@ -430,13 +348,7 @@ PYBIND11_MODULE(_msim_core, m) {
         .def_readwrite("arrival_mid", &ArrivalInfo::arrival_mid)
         .def_readwrite("is_limit",    &ArrivalInfo::is_limit);
 
-    py::class_<FillRecord>(m, "FillRecord", R"pbdoc(
-        One fill event from one agent's perspective.
-
-        Attributes
-        ----------
-        ts, owner, order_id, side, fill_qty, fill_price, arrival_mid, is_maker
-    )pbdoc")
+    py::class_<FillRecord>(m, "FillRecord")
         .def_readwrite("ts",          &FillRecord::ts)
         .def_readwrite("owner",       &FillRecord::owner)
         .def_readwrite("order_id",    &FillRecord::order_id)
@@ -445,18 +357,9 @@ PYBIND11_MODULE(_msim_core, m) {
         .def_readwrite("fill_price",  &FillRecord::fill_price)
         .def_readwrite("arrival_mid", &FillRecord::arrival_mid)
         .def_readwrite("is_maker",    &FillRecord::is_maker)
-        .def("slippage_ticks", &FillRecord::slippage_ticks)
-        .def("__repr__", [](const FillRecord& f) {
-            return "<FillRecord owner=" + std::to_string(f.owner)
-                 + " qty=" + std::to_string(f.fill_qty)
-                 + " px=" + std::to_string(f.fill_price)
-                 + " slip=" + std::to_string(f.slippage_ticks())
-                 + " maker=" + (f.is_maker ? "True" : "False") + ">";
-        });
+        .def("slippage_ticks", &FillRecord::slippage_ticks);
 
-    py::class_<StepSnapshot>(m, "StepSnapshot", R"pbdoc(
-        Mark-to-market state for one agent at one simulation step.
-    )pbdoc")
+    py::class_<StepSnapshot>(m, "StepSnapshot")
         .def_readwrite("ts",         &StepSnapshot::ts)
         .def_readwrite("owner",      &StepSnapshot::owner)
         .def_readwrite("position",   &StepSnapshot::position)
@@ -464,9 +367,7 @@ PYBIND11_MODULE(_msim_core, m) {
         .def_readwrite("mid",        &StepSnapshot::mid)
         .def("mtm_pnl", &StepSnapshot::mtm_pnl);
 
-    py::class_<AgentTCA>(m, "AgentTCA", R"pbdoc(
-        Per-agent Transaction Cost Analysis summary.
-    )pbdoc")
+    py::class_<AgentTCA>(m, "AgentTCA")
         .def_readwrite("owner",                   &AgentTCA::owner)
         .def_readwrite("n_orders_submitted",      &AgentTCA::n_orders_submitted)
         .def_readwrite("n_limit_submitted",       &AgentTCA::n_limit_submitted)
@@ -483,29 +384,11 @@ PYBIND11_MODULE(_msim_core, m) {
         .def_readwrite("turnover_notional_ticks", &AgentTCA::turnover_notional_ticks)
         .def_readwrite("final_position",          &AgentTCA::final_position)
         .def_readwrite("final_cash_ticks",        &AgentTCA::final_cash_ticks)
-        .def_readwrite("final_mtm_pnl",           &AgentTCA::final_mtm_pnl)
-        .def("__repr__", [](const AgentTCA& t) {
-            return "<AgentTCA owner=" + std::to_string(t.owner)
-                 + " pnl=" + std::to_string(t.final_mtm_pnl)
-                 + " fill_rate=" + std::to_string(t.limit_fill_rate)
-                 + " avg_slip=" + std::to_string(t.avg_slippage_ticks) + ">";
-        });
+        .def_readwrite("final_mtm_pnl",           &AgentTCA::final_mtm_pnl);
 
     // ── WorldResult ──────────────────────────────────────────────────────────
 
-    py::class_<WorldResult>(m, "WorldResult", R"pbdoc(
-        Output from a completed World.run() call.
-
-        Attributes
-        ----------
-        trades, tops, accounts, cancel_failures, modify_failures,
-        sf, fv_log, fills, pnl_series, tca
-
-        Methods
-        -------
-        trades_df, tops_df, accounts_df, fv_df,
-        fills_df, pnl_df, tca_df, summary
-    )pbdoc")
+    py::class_<WorldResult>(m, "WorldResult")
         .def_readwrite("trades",          &WorldResult::trades)
         .def_readwrite("tops",            &WorldResult::tops)
         .def_readwrite("accounts",        &WorldResult::accounts)
@@ -588,7 +471,7 @@ PYBIND11_MODULE(_msim_core, m) {
                 rows.append(row);
             }
             return pd.attr("DataFrame")(rows);
-        }, "All fills as a pandas DataFrame.")
+        })
         .def("pnl_df", [](const WorldResult& r) {
             py::module_ pd = py::module_::import("pandas");
             py::list rows;
@@ -603,7 +486,7 @@ PYBIND11_MODULE(_msim_core, m) {
                 rows.append(row);
             }
             return pd.attr("DataFrame")(rows);
-        }, "Per-agent per-step PnL series as a DataFrame.")
+        })
         .def("tca_df", [](const WorldResult& r) {
             py::module_ pd = py::module_::import("pandas");
             py::list rows;
@@ -626,7 +509,7 @@ PYBIND11_MODULE(_msim_core, m) {
                 rows.append(row);
             }
             return pd.attr("DataFrame")(rows);
-        }, "Per-agent TCA summary as a DataFrame.")
+        })
         .def("summary", [](const WorldResult& r) {
             if (!r.sf) {
                 py::print("No stylized facts (set compute_stylized_facts=True).");
@@ -635,56 +518,38 @@ PYBIND11_MODULE(_msim_core, m) {
             py::print(StylizedFactsMeasurer::summary(*r.sf));
         });
 
-    // ── CapacityHints ─────────────────────────────────────────────────────────
-
-    py::class_<CapacityHints>(m, "CapacityHints", R"pbdoc(
-        Pre-allocation hints for World.run().
-
-        Eliminates hash map rehashing — the dominant allocation cost in
-        1000-seed sweeps.  Leave at 0 for automatic estimation.
-
-        Attributes
-        ----------
-        expected_orders : int — total order submissions (0 = auto)
-        expected_trades : int — total trades expected   (0 = auto)
-
-        Example
-        -------
-        >>> cfg = msim.WorldConfig()
-        >>> cfg.capacity.expected_orders = 25_000
-        >>> cfg.capacity.expected_trades = 7_500
-    )pbdoc")
-        .def(py::init<>())
-        .def_readwrite("expected_orders", &CapacityHints::expected_orders)
-        .def_readwrite("expected_trades", &CapacityHints::expected_trades);
-
     // ── WorldConfig ───────────────────────────────────────────────────────────
+    // NOTE: CapacityHints was merged into WorldConfig as direct fields
+    // (expected_resting_orders, expected_fills) during the performance
+    // optimisation pass. The separate CapacityHints struct no longer exists.
 
     py::class_<WorldConfig>(m, "WorldConfig", R"pbdoc(
         Configuration for a World.run() call.
 
         Attributes
         ----------
-        dt_ns                   : int
-        latency_enabled         : bool
-        latency_configs         : list[LatencyDistConfig]
-        compute_stylized_facts  : bool  (default True)
-        record_fv_signals       : bool  (default False)
-        record_fills            : bool  (default True)
-        record_pnl_series       : bool  (default True)
-        track_queue_positions   : bool  (default True)
-        capacity                : CapacityHints
+        dt_ns                    : int   — step size in nanoseconds (default 1 ms)
+        latency_enabled          : bool
+        latency_configs          : list[LatencyDistConfig]
+        compute_stylized_facts   : bool  (default True)
+        record_fv_signals        : bool  (default False)
+        record_fills             : bool  (default True)
+        record_pnl_series        : bool  (default True)
+        track_queue_positions    : bool  (default True)
+        expected_resting_orders  : int   — pre-reserve hint (0 = auto)
+        expected_fills           : int   — pre-reserve hint (0 = auto)
     )pbdoc")
         .def(py::init<>())
-        .def_readwrite("dt_ns",                  &WorldConfig::dt_ns)
-        .def_readwrite("latency_enabled",        &WorldConfig::latency_enabled)
-        .def_readwrite("latency_configs",        &WorldConfig::latency_configs)
-        .def_readwrite("compute_stylized_facts", &WorldConfig::compute_stylized_facts)
-        .def_readwrite("record_fv_signals",      &WorldConfig::record_fv_signals)
-        .def_readwrite("record_fills",           &WorldConfig::record_fills)
-        .def_readwrite("record_pnl_series",      &WorldConfig::record_pnl_series)
-        .def_readwrite("track_queue_positions",  &WorldConfig::track_queue_positions)
-        .def_readwrite("capacity",               &WorldConfig::capacity);
+        .def_readwrite("dt_ns",                   &WorldConfig::dt_ns)
+        .def_readwrite("latency_enabled",         &WorldConfig::latency_enabled)
+        .def_readwrite("latency_configs",         &WorldConfig::latency_configs)
+        .def_readwrite("compute_stylized_facts",  &WorldConfig::compute_stylized_facts)
+        .def_readwrite("record_fv_signals",       &WorldConfig::record_fv_signals)
+        .def_readwrite("record_fills",            &WorldConfig::record_fills)
+        .def_readwrite("record_pnl_series",       &WorldConfig::record_pnl_series)
+        .def_readwrite("track_queue_positions",   &WorldConfig::track_queue_positions)
+        .def_readwrite("expected_resting_orders", &WorldConfig::expected_resting_orders)
+        .def_readwrite("expected_fills",          &WorldConfig::expected_fills);
 
     // ── LatencyDistConfig ─────────────────────────────────────────────────────
 
@@ -811,8 +676,6 @@ PYBIND11_MODULE(_msim_core, m) {
         .def_readwrite("min_half_spread_ticks", &MarketMakerASConfig::min_half_spread_ticks)
         .def_readwrite("warmup",                &MarketMakerASConfig::warmup);
 
-    // ── Execution agent configs ───────────────────────────────────────────────
-
     py::class_<VWAPConfig>(m, "VWAPConfig")
         .def(py::init<>())
         .def_readwrite("total_qty",            &VWAPConfig::total_qty)
@@ -844,8 +707,6 @@ PYBIND11_MODULE(_msim_core, m) {
         .def_readwrite("gamma",          &ISConfig::gamma)
         .def_readwrite("adapt_interval", &ISConfig::adapt_interval)
         .def_readwrite("sigma_ewma",     &ISConfig::sigma_ewma);
-
-    // ── HawkesConfig ─────────────────────────────────────────────────────────
 
     py::class_<HawkesConfig>(m, "HawkesConfig")
         .def(py::init<>())
@@ -879,8 +740,8 @@ PYBIND11_MODULE(_msim_core, m) {
         .def(py::init<OwnerId, HawkesNoiseConfig>(),
              py::arg("owner_id"),
              py::arg("config") = HawkesNoiseConfig{})
-        .def("hawkes_intensity",       &HawkesNoiseTrader::hawkes_intensity)
-        .def("hawkes_mean_intensity",  &HawkesNoiseTrader::hawkes_mean_intensity);
+        .def("hawkes_intensity",      &HawkesNoiseTrader::hawkes_intensity)
+        .def("hawkes_mean_intensity", &HawkesNoiseTrader::hawkes_mean_intensity);
 
     py::class_<MarketMakerAS, IAgent,
                std::unique_ptr<MarketMakerAS>>(agents, "MarketMakerAS")
@@ -927,8 +788,6 @@ PYBIND11_MODULE(_msim_core, m) {
         .def("urgency",       &ISAgent::urgency)
         .def("expected_is",   &ISAgent::expected_is)
         .def("pct_complete",  &ISAgent::pct_complete);
-
-    // ── Version ───────────────────────────────────────────────────────────────
 
     m.attr("__version__") = "0.1.0";
     m.attr("__author__")  = "MSIM Contributors";
