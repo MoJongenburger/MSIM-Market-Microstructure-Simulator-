@@ -1,16 +1,31 @@
 // ============================================================
 // src/book.cpp
 //
-// Changes vs previous version:
-//   - BidMap / AskMap are now FlatPriceMap — no code changes needed
-//     because FlatPriceMap's API mirrors std::map (.find, operator[],
-//     .erase, structured bindings, ->first/->second all work).
-//   - reserve() signature extended with n_levels parameter.
-//   - queue_info() now indexes into FlatPriceMap via .find() instead
-//     of std::map's .find() — identical call site.
+// Implements the vector-queue + tombstone design from book.hpp.
+//
+// add_resting_limit
+//   abs_idx = q.size() before push_back.
+//   Store (side, price, abs_idx) in loc_.
+//
+// cancel
+//   Look up abs_idx via loc_.
+//   Set q[abs_idx].qty = 0 (tombstone).
+//   Decrement total_qty.
+//   If total_qty == 0, erase the level from the map.
+//
+// modify_qty
+//   Access q[abs_idx] directly.  Reduce qty in place.
+//   Adjust total_qty.
+//
+// match_buy / match_sell (in matching_engine.cpp)
+//   Skip tombstones at front_offset before each match step.
+//   On full consumption advance ++front_offset.
+//
+// queue_info
+//   Walk from front_offset to q.size(), skipping tombstones,
+//   until abs_idx is reached.
 // ============================================================
 #include "msim/book.hpp"
-#include <algorithm>
 
 namespace msim {
 
@@ -26,23 +41,22 @@ bool OrderBook::would_cross(const Order& o) const noexcept {
 
 bool OrderBook::add_resting_limit(Order o) {
   if (o.type != OrderType::Limit) return false;
-  if (o.qty <= 0)                  return false;
-  if (would_cross(o))              return false;
+  if (o.qty  <= 0)                return false;
+  if (would_cross(o))             return false;
 
   if (o.side == Side::Buy) {
-    auto& lvl = bids_[o.price];   // find-or-insert: O(log N) binary search
-    lvl.q.push_back(o);           // O(1): pool alloc + list append
-    auto it = std::prev(lvl.q.end());
-    lvl.total_qty += o.qty;
-    loc_[o.id] = Locator{Side::Buy, o.price, it};
+    auto& lvl           = bids_[o.price];         // O(log N) find-or-insert
+    const std::size_t idx = lvl.q.size();
+    lvl.q.push_back(o);                           // O(1) amortised
+    lvl.total_qty      += o.qty;
+    loc_[o.id]          = Locator{Side::Buy, o.price, idx};
   } else {
-    auto& lvl = asks_[o.price];
+    auto& lvl           = asks_[o.price];
+    const std::size_t idx = lvl.q.size();
     lvl.q.push_back(o);
-    auto it = std::prev(lvl.q.end());
-    lvl.total_qty += o.qty;
-    loc_[o.id] = Locator{Side::Sell, o.price, it};
+    lvl.total_qty      += o.qty;
+    loc_[o.id]          = Locator{Side::Sell, o.price, idx};
   }
-
   return true;
 }
 
@@ -51,28 +65,29 @@ bool OrderBook::cancel(OrderId id) noexcept {
   if (it == loc_.end()) return false;
 
   const Locator loc = it->second;
+  loc_.erase(it);
 
   if (loc.side == Side::Buy) {
-    auto lvl_it = bids_.find(loc.price);   // O(log N) binary search
-    if (lvl_it == bids_.end()) { loc_.erase(it); return false; }
+    auto lvl_it = bids_.find(loc.price);
+    if (lvl_it == bids_.end()) return false;
     auto& lvl = lvl_it->second;
 
-    lvl.total_qty -= loc.it->qty;
-    lvl.q.erase(loc.it);           // O(1): pool free + list pointer update
+    Order& o = lvl.q[loc.abs_idx];
+    lvl.total_qty -= o.qty;
+    o.qty          = 0;                 // tombstone — skip during matching
 
-    if (lvl.q.empty()) bids_.erase(lvl_it);   // O(N) shift, rare
+    if (lvl.total_qty == 0) bids_.erase(lvl_it);
   } else {
     auto lvl_it = asks_.find(loc.price);
-    if (lvl_it == asks_.end()) { loc_.erase(it); return false; }
+    if (lvl_it == asks_.end()) return false;
     auto& lvl = lvl_it->second;
 
-    lvl.total_qty -= loc.it->qty;
-    lvl.q.erase(loc.it);
+    Order& o = lvl.q[loc.abs_idx];
+    lvl.total_qty -= o.qty;
+    o.qty          = 0;
 
-    if (lvl.q.empty()) asks_.erase(lvl_it);
+    if (lvl.total_qty == 0) asks_.erase(lvl_it);
   }
-
-  loc_.erase(it);
   return true;
 }
 
@@ -82,36 +97,34 @@ bool OrderBook::modify_qty(OrderId id, Qty new_qty) noexcept {
   auto it = loc_.find(id);
   if (it == loc_.end()) return false;
 
-  Locator& loc = it->second;
-  if (loc.it->qty <= 0) return false;
-
-  const Qty old_qty = loc.it->qty;
-  if (new_qty > old_qty) return false;   // reduce-only
-
-  const Qty delta  = old_qty - new_qty;
-  loc.it->qty      = new_qty;
+  const Locator& loc = it->second;
 
   if (loc.side == Side::Buy) {
-    auto lvl_it = bids_.find(loc.price);   // O(log N) binary search
+    auto lvl_it = bids_.find(loc.price);
     if (lvl_it == bids_.end()) return false;
-    lvl_it->second.total_qty -= delta;
+    Order& o = lvl_it->second.q[loc.abs_idx];
+    if (o.qty <= 0 || new_qty > o.qty) return false;   // tombstone or increase
+    lvl_it->second.total_qty -= (o.qty - new_qty);
+    o.qty = new_qty;
   } else {
     auto lvl_it = asks_.find(loc.price);
     if (lvl_it == asks_.end()) return false;
-    lvl_it->second.total_qty -= delta;
+    Order& o = lvl_it->second.q[loc.abs_idx];
+    if (o.qty <= 0 || new_qty > o.qty) return false;
+    lvl_it->second.total_qty -= (o.qty - new_qty);
+    o.qty = new_qty;
   }
-
   return true;
 }
 
 std::optional<Price> OrderBook::best_bid() const noexcept {
   if (bids_.empty()) return std::nullopt;
-  return bids_.begin()->first;   // O(1): front of sorted vector
+  return bids_.begin()->first;
 }
 
 std::optional<Price> OrderBook::best_ask() const noexcept {
   if (asks_.empty()) return std::nullopt;
-  return asks_.begin()->first;   // O(1): front of sorted vector
+  return asks_.begin()->first;
 }
 
 bool OrderBook::is_crossed() const noexcept {
@@ -123,21 +136,23 @@ std::vector<LevelSummary> OrderBook::depth(Side side,
   std::vector<LevelSummary> out;
   out.reserve(levels);
 
-  if (side == Side::Buy) {
+  auto emit = [&](const auto& map) {
     std::size_t n = 0;
-    for (const auto& [px, lvl] : bids_) {
+    for (const auto& [px, lvl] : map) {
       if (n++ >= levels) break;
-      out.push_back({px, lvl.total_qty,
-                     static_cast<uint32_t>(lvl.q.size())});
+      if (lvl.total_qty == 0) continue;
+
+      // Count live (non-tombstone) orders
+      uint32_t live = 0;
+      for (std::size_t i = lvl.front_offset; i < lvl.q.size(); ++i)
+        if (lvl.q[i].qty > 0) ++live;
+
+      out.push_back({px, lvl.total_qty, live});
     }
-  } else {
-    std::size_t n = 0;
-    for (const auto& [px, lvl] : asks_) {
-      if (n++ >= levels) break;
-      out.push_back({px, lvl.total_qty,
-                     static_cast<uint32_t>(lvl.q.size())});
-    }
-  }
+  };
+
+  if (side == Side::Buy) emit(bids_);
+  else                   emit(asks_);
 
   return out;
 }
@@ -150,56 +165,55 @@ std::size_t OrderBook::level_count(Side side) const noexcept {
   return (side == Side::Buy) ? bids_.size() : asks_.size();
 }
 
-// ── queue_info() ──────────────────────────────────────────────────────────────
-// Walk the queue at the order's price level from front to its iterator,
-// accumulating qty_ahead.  O(k) where k = position_index.
 QueueInfo OrderBook::queue_info(OrderId id) const noexcept {
   const auto loc_it = loc_.find(id);
   if (loc_it == loc_.end()) return QueueInfo{};
 
   const Locator& loc = loc_it->second;
 
-  const Queue* q_ptr    = nullptr;
-  Qty          level_total = 0;
-
+  const Level* lvl_ptr = nullptr;
   if (loc.side == Side::Buy) {
-    const auto lvl_it = bids_.find(loc.price);
-    if (lvl_it == bids_.end()) return QueueInfo{};
-    q_ptr       = &lvl_it->second.q;
-    level_total =  lvl_it->second.total_qty;
+    auto it = bids_.find(loc.price);
+    if (it == bids_.end()) return QueueInfo{};
+    lvl_ptr = &it->second;
   } else {
-    const auto lvl_it = asks_.find(loc.price);
-    if (lvl_it == asks_.end()) return QueueInfo{};
-    q_ptr       = &lvl_it->second.q;
-    level_total =  lvl_it->second.total_qty;
+    auto it = asks_.find(loc.price);
+    if (it == asks_.end()) return QueueInfo{};
+    lvl_ptr = &it->second;
   }
 
-  const Queue& q = *q_ptr;
+  const Level& lvl = *lvl_ptr;
+
+  // Validate: abs_idx in range and not tombstoned
+  if (loc.abs_idx >= lvl.q.size())     return QueueInfo{};
+  if (lvl.q[loc.abs_idx].qty == 0)     return QueueInfo{};
 
   QueueInfo info{};
   info.found       = true;
-  info.level_total = level_total;
+  info.level_total = lvl.total_qty;
+  info.own_qty     = lvl.q[loc.abs_idx].qty;
 
-  int  idx        = 0;
+  int  pos        = 0;
   Qty  ahead      = 0;
-  bool found_self = false;
+  bool past_self  = false;
 
-  for (auto it = q.begin(); it != q.end(); ++it) {
-    if (it == loc.it) {
-      info.own_qty        = it->qty;
+  for (std::size_t i = lvl.front_offset; i < lvl.q.size(); ++i) {
+    if (lvl.q[i].qty == 0) continue;   // skip tombstone
+
+    if (i == loc.abs_idx) {
+      info.position_index = pos;
       info.qty_ahead      = ahead;
-      info.position_index = idx;
-      found_self          = true;
-    } else if (!found_self) {
-      ahead += it->qty;
-      ++idx;
+      past_self           = true;
+    } else if (!past_self) {
+      ahead += lvl.q[i].qty;
+      ++pos;
     } else {
-      info.qty_behind += it->qty;
+      info.qty_behind += lvl.q[i].qty;
     }
   }
 
-  if (!found_self) return QueueInfo{};
+  if (!past_self) return QueueInfo{};   // sanity check
   return info;
 }
 
-} // namespace msim
+}  // namespace msim
