@@ -266,7 +266,6 @@ WorldResult World::run(uint64_t seed,
   // PERF: reserve(n_tops, n_trades) pre-allocates the internal accumulation
   // vectors so they never reallocate during the run.
   StylizedFactsMeasurer sfm(20, 10);
-  sfm.reserve(n_steps, est_fills);   // ← NEW: eliminates growing reallocations
 
   LatencyActionBuffer lat_buf;
 
