@@ -3,20 +3,48 @@
 // include/msim/book.hpp
 //
 // Performance changes vs previous version:
-//   Added best_bid_qty() and best_ask_qty().
-//   These are O(1) reads from the front of FlatPriceMap,
-//   replacing the depth(1) call in World::compute_imbalance()
-//   which constructed a temporary vector every step.
+//
+//   Per-level queue: std::list → std::vector + front_offset
+//   --------------------------------------------------------
+//   std::list stores each Order in a separately-allocated heap
+//   node.  Even with OrderNodeAllocator, iterating the list
+//   during matching is pointer-chasing — each node's ->next
+//   could be in a different slab page.
+//
+//   std::vector<Order> stores all orders at a price level
+//   contiguously.  The matching inner loop becomes a sequential
+//   scan the hardware prefetcher can run at full speed.
+//
+//   Locator: Queue::iterator → abs_idx (std::size_t)
+//   -------------------------------------------------
+//   A list iterator is a pointer to a heap node.  With the
+//   vector-based queue we can't store an iterator (vector
+//   iterators are invalidated on push_back).  Instead we store
+//   abs_idx — the index into the vector at the time of insertion.
+//   abs_idx is stable: push_back may grow the vector (moving
+//   all elements) but indices do not change.
+//
+//   Cancel: tombstone instead of erase
+//   ------------------------------------
+//   Erasing from the middle of a vector is O(N).  Instead,
+//   cancel() sets Order::qty = 0 at abs_idx (a tombstone).
+//   match_buy / match_sell skip tombstones at the front of the
+//   queue before each match step — O(k) where k is the number
+//   of consecutive cancelled orders.  In practice k ~ 0-1.
+//   The level is erased from the FlatPriceMap only when
+//   total_qty reaches 0 (all live qty consumed or cancelled).
+//
+//   order_pool.hpp is no longer included — std::list and the
+//   slab allocator are no longer used.
 // ============================================================
 
 #include <algorithm>
-#include <list>
+#include <cstddef>
 #include <optional>
 #include <unordered_map>
 #include <vector>
 
 #include "msim/flat_price_map.hpp"
-#include "msim/order_pool.hpp"
 #include "msim/order.hpp"
 #include "msim/invariants.hpp"
 #include "msim/types.hpp"
@@ -41,7 +69,7 @@ struct QueueInfo {
 class MatchingEngine;
 
 class OrderBook {
-public:
+ public:
   bool add_resting_limit(Order o);
   bool cancel(OrderId id) noexcept;
   bool modify_qty(OrderId id, Qty new_qty) noexcept;
@@ -55,14 +83,10 @@ public:
   std::vector<LevelSummary> depth(Side side, std::size_t levels) const;
   QueueInfo queue_info(OrderId id) const noexcept;
 
-  bool        empty(Side side)       const noexcept;
-  std::size_t level_count(Side side) const noexcept;
+  bool        empty(Side side)        const noexcept;
+  std::size_t level_count(Side side)  const noexcept;
 
-  // ── O(1) top-of-book quantity reads ───────────────────────────────────────
-  // These replace depth(side, 1) in World::compute_imbalance().
-  // With FlatPriceMap, the best level is always entries_.front(),
-  // so these are a single pointer dereference — no binary search,
-  // no vector construction.
+  // O(1) top-of-book quantity — used by World::compute_imbalance().
   Qty best_bid_qty() const noexcept {
     return bids_.empty() ? Qty{0} : bids_.begin()->second.total_qty;
   }
@@ -78,14 +102,19 @@ public:
     asks_.reserve(n_levels);
   }
 
-private:
+ private:
   friend class MatchingEngine;
 
-  using Queue = std::list<Order, OrderNodeAllocator<Order>>;
-
+  // ── Level ────────────────────────────────────────────────────────────────
+  // q           — all Orders ever pushed at this price (including tombstones).
+  // front_offset — index of the first entry that might be live.
+  //               Advances when the front order is fully matched.
+  // total_qty   — sum of live (non-tombstone) Order::qty values.
+  //               When this reaches 0, the level is erased from the map.
   struct Level {
-    Queue q{};
-    Qty   total_qty{};
+    std::vector<Order> q{};
+    std::size_t        front_offset{0};
+    Qty                total_qty{};
   };
 
   using BidMap = FlatPriceMap<Level, std::greater<Price>>;
@@ -94,10 +123,14 @@ private:
   BidMap bids_;
   AskMap asks_;
 
+  // ── Locator ──────────────────────────────────────────────────────────────
+  // abs_idx is the index into Level::q at insertion time.
+  // It is stable across push_back-induced reallocations of q
+  // because we never erase or insert in the middle.
   struct Locator {
-    Side            side{};
-    Price           price{};
-    Queue::iterator it{};
+    Side        side{};
+    Price       price{};
+    std::size_t abs_idx{};
   };
 
   std::unordered_map<OrderId, Locator> loc_;
@@ -105,4 +138,4 @@ private:
   bool would_cross(const Order& o) const noexcept;
 };
 
-} // namespace msim
+}  // namespace msim
