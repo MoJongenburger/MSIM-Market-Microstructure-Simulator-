@@ -55,9 +55,8 @@ struct AccountSnapshot {
   int64_t mtm_ticks{};
 };
 
-inline void apply_trades_to_accounts(
-    Ts ts,
-    const std::vector<Trade>& trades,
+inline void apply_trades_to_accounts(Ts ts,
+    std::span<const Trade> trades,
     const std::unordered_map<OrderId, OrderMeta>& meta,
     std::unordered_map<OwnerId, Account>& accounts,
     std::optional<Price> mid_for_mtm) {
