@@ -108,6 +108,14 @@ public:
   void add_top(const TopRecord& top)   { tops_.push_back(top); }
   void clear() { trades_.clear(); tops_.clear(); }
 
+  // Pre-reserve internal accumulation vectors.
+  // Call once after construction with expected n_tops (= n_steps) and
+  // n_trades (= est_fills) so neither vector ever reallocates during run().
+  void reserve(std::size_t n_tops, std::size_t n_trades) {
+    tops_.reserve(n_tops);
+    trades_.reserve(n_trades);
+  }
+
   std::size_t n_trades() const noexcept { return trades_.size(); }
   std::size_t n_tops()   const noexcept { return tops_.size();   }
 
@@ -152,7 +160,7 @@ public:
 
     os << "Price Impact:\n";
     os << "  Kyle's lambda:   " << sf.impact.kyle_lambda    << " ticks/lot\n";
-    os << "  R²:              " << sf.impact.r_squared      << "\n";
+    os << "  RÂ²:              " << sf.impact.r_squared      << "\n";
     os << "  Power exponent:  " << sf.impact.power_exponent << "  (theory ~0.5)\n\n";
 
     os << "Spread & Liquidity:\n";
@@ -225,7 +233,6 @@ private:
   }
 
   // Sample autocorrelation at lag k
-  // All indices cast to size_t to avoid sign-conversion errors.
   static double autocorr_at_lag(const std::vector<double>& x, int lag) {
     if (static_cast<int>(x.size()) <= lag) return 0.0;
     const std::size_t n   = x.size();
@@ -242,7 +249,6 @@ private:
     return denom < 1e-14 ? 0.0 : num / denom;
   }
 
-  // Central moments: mean, variance, skewness, excess kurtosis
   static void moments(const std::vector<double>& x,
                       double& mean, double& var,
                       double& skew, double& kurt)
@@ -264,8 +270,6 @@ private:
     kurt = (m2 < 1e-14) ? 0.0 : m4 / (m2 * m2) - 3.0;
   }
 
-  // OLS: y = a + b·x; returns {a, b, R²}
-  // All indices cast to size_t.
   static std::tuple<double,double,double>
   ols(const std::vector<double>& x, const std::vector<double>& y)
   {
@@ -287,7 +291,6 @@ private:
     return {a, b, std::max(0.0, r2)};
   }
 
-  // ── Return statistics ─────────────────────────────────────────────────────
   ReturnStats compute_return_stats() const {
     ReturnStats rs{};
     const auto ret = log_returns();
@@ -304,7 +307,6 @@ private:
     return rs;
   }
 
-  // ── Autocorrelations ──────────────────────────────────────────────────────
   AutocorrResult compute_autocorr() const {
     AutocorrResult ac;
     ac.max_lag = max_lag_;
@@ -314,8 +316,6 @@ private:
     std::transform(ret.begin(), ret.end(), abs_ret.begin(),
                    [](double r){ return std::abs(r); });
 
-    // Trade-sign series: +1 = buyer-initiated, -1 = seller-initiated
-    // FIX: Side::Buy (not Side::BUY)
     std::vector<double> signs;
     signs.reserve(trades_.size());
     for (const auto& t : trades_)
@@ -329,13 +329,10 @@ private:
     return ac;
   }
 
-  // ── Price impact ──────────────────────────────────────────────────────────
   PriceImpactResult compute_price_impact() const {
     PriceImpactResult pi{};
     if (trades_.size() < 10) return pi;
 
-    // (signed_volume, subsequent_price_change) pairs
-    // FIX: Side::Buy (not Side::BUY)
     std::vector<double> xs, ys;
     for (std::size_t i = 0; i + 1 < trades_.size(); ++i) {
       const double dp = static_cast<double>(
@@ -346,14 +343,12 @@ private:
       ys.push_back(dp);
     }
 
-    // Linear OLS → Kyle's lambda
     {
       auto [a, b, r2] = ols(xs, ys);
       pi.kyle_lambda = b;
       pi.r_squared   = r2;
     }
 
-    // Log-log OLS → power exponent
     {
       std::vector<double> lx, ly;
       for (std::size_t i = 0; i < xs.size(); ++i) {
@@ -368,7 +363,6 @@ private:
       }
     }
 
-    // Binned impact curve — all indices std::size_t
     if (!xs.empty()) {
       const double xmin = *std::min_element(xs.begin(), xs.end());
       const double xmax = *std::max_element(xs.begin(), xs.end());
@@ -397,12 +391,10 @@ private:
     return pi;
   }
 
-  // ── Spread statistics ─────────────────────────────────────────────────────
   SpreadStats compute_spread_stats() const {
     SpreadStats ss{};
     if (tops_.size() < 2) return ss;
 
-    // Time-weighted spread
     double tw_ns = 0.0, total_ns = 0.0;
     for (std::size_t i = 1; i < tops_.size(); ++i) {
       const double dur = static_cast<double>(tops_[i].ts - tops_[i-1].ts);
@@ -414,8 +406,6 @@ private:
 
     if (trades_.empty()) return ss;
 
-    // Effective spread: 2·dir·(trade_price − mid_at_trade)
-    // FIX: Side::Buy (not Side::BUY)
     double eff_sum = 0.0;
     int    eff_cnt = 0;
     for (const auto& t : trades_) {
@@ -428,7 +418,6 @@ private:
     ss.effective_spread_mean = (eff_cnt > 0)
         ? eff_sum / static_cast<double>(eff_cnt) : 0.0;
 
-    // Realized spread and adverse selection (vs mid 5 trades later)
     double real_sum = 0.0, adv_sum = 0.0;
     const std::size_t n = trades_.size();
     const std::size_t lookahead = 5;
@@ -448,7 +437,6 @@ private:
     return ss;
   }
 
-  // ── Amihud illiquidity ────────────────────────────────────────────────────
   AmihudStats compute_amihud() const {
     AmihudStats as{};
     if (trades_.size() < 2) return as;
