@@ -163,6 +163,11 @@ private:
   std::vector<PendingAction> pending_;
 };
 
+// ─── IAgent ───────────────────────────────────────────────────────────────────
+class IAgent {
+public:
+  virtual ~IAgent() = default;
+  virtual OwnerId owner() const noexcept = 0;
   virtual void seed(uint64_t s) = 0;
   virtual void step(Ts ts,
                     const MarketView&    view,
