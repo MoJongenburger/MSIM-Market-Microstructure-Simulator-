@@ -28,14 +28,14 @@ bool OrderBook::add_resting_limit(Order o) {
 
   if (o.side == Side::Buy) {
     auto& lvl             = bids_[o.price];
-    const std::size_t idx = lvl.q.size();
+    const auto idx = static_cast<uint32_t>(lvl.q.size());
     lvl.q.push_back(o);
     lvl.total_qty        += o.qty;
     ++lvl.live_count;
     loc_[o.id]            = Locator{Side::Buy, o.price, idx};
   } else {
     auto& lvl             = asks_[o.price];
-    const std::size_t idx = lvl.q.size();
+    const auto idx = static_cast<uint32_t>(lvl.q.size());
     lvl.q.push_back(o);
     lvl.total_qty        += o.qty;
     ++lvl.live_count;
@@ -45,11 +45,8 @@ bool OrderBook::add_resting_limit(Order o) {
 }
 
 bool OrderBook::cancel(OrderId id) noexcept {
-  auto it = loc_.find(id);
-  if (it == loc_.end()) return false;
-
-  const Locator loc = it->second;
-  loc_.erase(it);
+  Locator loc{};
+  if (!loc_.extract(id, loc)) return false;
 
   if (loc.side == Side::Buy) {
     auto lvl_it = bids_.find(loc.price);
@@ -80,10 +77,9 @@ bool OrderBook::cancel(OrderId id) noexcept {
 bool OrderBook::modify_qty(OrderId id, Qty new_qty) noexcept {
   if (new_qty <= 0) return cancel(id);
 
-  auto it = loc_.find(id);
-  if (it == loc_.end()) return false;
-
-  const Locator& loc = it->second;
+  const Locator* lp = loc_.find(id);
+  if (!lp) return false;
+  const Locator loc = *lp;
 
   if (loc.side == Side::Buy) {
     auto lvl_it = bids_.find(loc.price);
@@ -147,10 +143,9 @@ std::size_t OrderBook::level_count(Side side) const noexcept {
 }
 
 QueueInfo OrderBook::queue_info(OrderId id) const noexcept {
-  const auto loc_it = loc_.find(id);
-  if (loc_it == loc_.end()) return QueueInfo{};
-
-  const Locator& loc = loc_it->second;
+  const Locator* loc_ptr = loc_.find(id);
+  if (!loc_ptr) return QueueInfo{};
+  const Locator& loc = *loc_ptr;
 
   const Level* lvl_ptr = nullptr;
   if (loc.side == Side::Buy) {
