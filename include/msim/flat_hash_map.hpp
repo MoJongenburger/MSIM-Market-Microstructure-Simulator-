@@ -2,33 +2,41 @@
 // ============================================================
 // include/msim/flat_hash_map.hpp
 //
-// Open-addressing flat hash map with linear probing.
+// v2 — backward-shift deletion, no tombstones.
 //
-// Why this beats std::unordered_map for loc_ in OrderBook:
+// What went wrong in v1:
+//   Tombstone-based deletion left dead slots in the probe
+//   chain.  After each erase_locator() call during matching,
+//   tombstones accumulated.  find() had to skip them on every
+//   subsequent probe, causing BM_ProcessMarketOrder to regress
+//   +22% and BM_BookAddRestingLimit to regress +39%.
 //
-//   std::unordered_map uses separate chaining (bucket array of
-//   linked lists).  Every lookup chases a pointer from the
-//   bucket array into a heap-allocated node — 1–2 cache misses
-//   per operation.  For Cancel/Add/Modify (which each do one
-//   loc_ lookup) this is 40–80 ns of pure memory latency.
+// What v2 does differently:
 //
-//   FlatHashMap stores keys, values, and state bytes together
-//   in one contiguous std::vector.  At 512 slots × 24 bytes
-//   = 12 KB — the entire map fits in L1 cache.  Lookup probes
-//   at most a handful of consecutive cache lines.  Zero pointer
-//   indirection.
+//   1. No tombstones — only EMPTY (0) and OCCUPIED (1).
+//      find() stops at the first EMPTY slot, no skipping.
 //
-// Design:
-//   - Fibonacci hashing  (key × 2^64/φ >> (64 - log2_cap))
-//     gives uniform distribution for sequential uint64_t keys.
-//   - Linear probing     (simple, cache-friendly, fast in L1).
-//   - Tombstone deletion (state byte: EMPTY / OCCUPIED / TOMB).
-//   - extract(key, out)  — find + erase in one pass (used by
-//     cancel so we don't hash twice).
-//   - grow()             — doubles capacity, rebuilds without
-//     tombstones; called automatically at 50% load.
-//   - max_load_factor()  — no-op stub so drop-in API matches
-//     std::unordered_map call sites.
+//   2. Backward-shift deletion.  After erasing slot i, scan
+//      forward (j = i+1, i+2, …) until an EMPTY slot.  For
+//      each occupied slot j, if its natural position h would
+//      have been placed at i or earlier (dist(h→i) < dist(h→j)),
+//      shift it back to i.  This restores the linear-probe
+//      invariant without tombstones.  O(1) amortised.
+//
+//   3. Default capacity 256 slots (6 KB) — typical benchmark
+//      runs never trigger grow().  At 75% load that handles
+//      192 simultaneous resting orders before the first grow.
+//
+//   4. insert_new(key) — for known-new keys (add_resting_limit
+//      always inserts a fresh OrderId).  Skips the equality
+//      check during the probe → one branch fewer per slot.
+//
+//   5. extract(key, out) — find + erase in one probe pass.
+//      Used by cancel() so we don't hash twice.
+//
+// Slot layout at Locator = {Side(1)+pad(3)+Price(4)+u32(4)}:
+//   key(8) + value(12) + state(1) + pad(3) = 24 bytes/slot
+//   256 slots = 6 KB  (L1 cache on all modern CPUs is ≥32 KB)
 // ============================================================
 
 #include <cstddef>
@@ -40,12 +48,8 @@ namespace msim {
 template <typename K, typename V>
 class FlatHashMap {
 public:
-    // ── Slot ─────────────────────────────────────────────────────────────
-    // Packed to 24 bytes for OrderId(8) + Locator(12) + state(1) + pad(3).
-    // 512 slots = 12 KB — fits in L1 on all modern CPUs.
-    static constexpr uint8_t EMPTY     = 0;
-    static constexpr uint8_t OCCUPIED  = 1;
-    static constexpr uint8_t TOMBSTONE = 2;
+    static constexpr uint8_t EMPTY    = 0;
+    static constexpr uint8_t OCCUPIED = 1;
 
     struct Slot {
         K       key{};
@@ -53,51 +57,50 @@ public:
         uint8_t state{EMPTY};
     };
 
-    // ── Capacity hint ─────────────────────────────────────────────────────
-    // Allocate power-of-2 capacity >= n * 2 (50% load factor).
+    // Default: 256 slots, 75% load → handles 192 orders without grow.
+    FlatHashMap() { init(256, 8); }
+
+    // Allocate power-of-2 capacity with at most 75% load for n elements.
     void reserve(std::size_t n) {
-        log2cap_ = 4u;
-        std::size_t cap = 16;
-        while (cap < n * 2) { cap <<= 1u; ++log2cap_; }
-        slots_.assign(cap, Slot{});
-        mask_       = cap - 1;
-        size_       = 0;
-        tombstones_ = 0;
+        uint32_t log2 = 8;
+        std::size_t cap = 256;
+        while (cap * 3 < n * 4) { cap <<= 1u; ++log2; }
+        init(cap, log2);
     }
 
-    // No-op stub — we manage load factor internally.
-    void max_load_factor(float) noexcept {}
+    void max_load_factor(float) noexcept {}  // managed internally at 75%
 
-    // ── operator[] ────────────────────────────────────────────────────────
-    // Insert-or-access.  Reuses tombstone slot if one was encountered first.
+    // ── insert or access (handles duplicate keys) ─────────────────────────
     V& operator[](K key) {
-        if ((size_ + tombstones_ + 1) * 2 > slots_.size()) grow();
-        const std::size_t start = hash_idx(key);
-        std::size_t i           = start;
-        std::size_t first_tomb  = npos;
-        while (slots_[i].state != EMPTY) {
-            if (slots_[i].state == OCCUPIED && slots_[i].key == key)
-                return slots_[i].value;
-            if (slots_[i].state == TOMBSTONE && first_tomb == npos)
-                first_tomb = i;
+        if (size_ * 4 >= slots_.size() * 3) grow();
+        std::size_t i = hash_idx(key);
+        while (slots_[i].state) {
+            if (slots_[i].key == key) return slots_[i].value;
             i = (i + 1) & mask_;
         }
-        const std::size_t pos = (first_tomb != npos) ? first_tomb : i;
-        if (slots_[pos].state == TOMBSTONE) --tombstones_;
-        slots_[pos].key   = key;
-        slots_[pos].value = V{};
-        slots_[pos].state = OCCUPIED;
+        slots_[i] = {key, V{}, OCCUPIED};
         ++size_;
-        return slots_[pos].value;
+        return slots_[i].value;
     }
 
-    // ── find ──────────────────────────────────────────────────────────────
-    // Returns pointer to value, or nullptr.  Skips tombstones.
+    // ── insert known-new key (no equality check in probe) ─────────────────
+    // Use only when the key is guaranteed not already present.
+    // add_resting_limit() always inserts a fresh OrderId → use this.
+    V& insert_new(K key) {
+        if (size_ * 4 >= slots_.size() * 3) grow();
+        std::size_t i = hash_idx(key);
+        while (slots_[i].state)           // stop at first EMPTY
+            i = (i + 1) & mask_;
+        slots_[i] = {key, V{}, OCCUPIED};
+        ++size_;
+        return slots_[i].value;
+    }
+
+    // ── find (returns pointer or nullptr) ─────────────────────────────────
     V* find(K key) noexcept {
         std::size_t i = hash_idx(key);
-        while (slots_[i].state != EMPTY) {
-            if (slots_[i].state == OCCUPIED && slots_[i].key == key)
-                return &slots_[i].value;
+        while (slots_[i].state) {
+            if (slots_[i].key == key) return &slots_[i].value;
             i = (i + 1) & mask_;
         }
         return nullptr;
@@ -105,25 +108,21 @@ public:
 
     const V* find(K key) const noexcept {
         std::size_t i = hash_idx(key);
-        while (slots_[i].state != EMPTY) {
-            if (slots_[i].state == OCCUPIED && slots_[i].key == key)
-                return &slots_[i].value;
+        while (slots_[i].state) {
+            if (slots_[i].key == key) return &slots_[i].value;
             i = (i + 1) & mask_;
         }
         return nullptr;
     }
 
-    // ── extract ───────────────────────────────────────────────────────────
-    // Find + erase in a single pass.  Used by cancel() so we don't hash
-    // twice.  Returns true and moves the value into `out` on success.
+    // ── extract: find + erase in one probe pass ───────────────────────────
     bool extract(K key, V& out) noexcept {
         std::size_t i = hash_idx(key);
-        while (slots_[i].state != EMPTY) {
-            if (slots_[i].state == OCCUPIED && slots_[i].key == key) {
-                out             = std::move(slots_[i].value);
-                slots_[i].state = TOMBSTONE;
+        while (slots_[i].state) {
+            if (slots_[i].key == key) {
+                out = std::move(slots_[i].value);
+                backward_shift(i);
                 --size_;
-                ++tombstones_;
                 return true;
             }
             i = (i + 1) & mask_;
@@ -131,14 +130,13 @@ public:
         return false;
     }
 
-    // ── erase ─────────────────────────────────────────────────────────────
+    // ── erase by key ──────────────────────────────────────────────────────
     bool erase(K key) noexcept {
         std::size_t i = hash_idx(key);
-        while (slots_[i].state != EMPTY) {
-            if (slots_[i].state == OCCUPIED && slots_[i].key == key) {
-                slots_[i].state = TOMBSTONE;
+        while (slots_[i].state) {
+            if (slots_[i].key == key) {
+                backward_shift(i);
                 --size_;
-                ++tombstones_;
                 return true;
             }
             i = (i + 1) & mask_;
@@ -146,46 +144,65 @@ public:
         return false;
     }
 
-    // ── clear ─────────────────────────────────────────────────────────────
-    // Resets all slots to EMPTY without releasing memory.
+    // ── clear (keep capacity) ─────────────────────────────────────────────
     void clear() noexcept {
         for (auto& s : slots_) s.state = EMPTY;
-        size_       = 0;
-        tombstones_ = 0;
+        size_ = 0;
     }
 
     std::size_t size()  const noexcept { return size_; }
     bool        empty() const noexcept { return size_ == 0; }
 
 private:
-    static constexpr std::size_t npos = std::size_t(-1);
-
-    // Fibonacci hashing — excellent distribution for sequential uint64_t.
-    // 11400714819323198485 ≈ 2^64 / φ
+    // ── Fibonacci hashing ─────────────────────────────────────────────────
+    // 2^64 / φ ≈ 11400714819323198485.  Gives uniform distribution for
+    // sequential uint64_t keys (OrderId = owner<<32 | seq).
     std::size_t hash_idx(K key) const noexcept {
         return static_cast<std::size_t>(
             static_cast<uint64_t>(key) * 11400714819323198485ULL
         ) >> (64u - log2cap_);
     }
 
-    // Double capacity, rebuild without tombstones.
+    // ── Backward-shift deletion ───────────────────────────────────────────
+    // Mark slot i as EMPTY, then scan forward.  For each occupied slot j,
+    // if its natural position h has dist(h→i) < dist(h→j) — meaning the
+    // probe chain from h passes through i before reaching j — move j to i.
+    // This restores the probe-chain invariant without tombstones.
+    void backward_shift(std::size_t i) noexcept {
+        slots_[i].state = EMPTY;
+        std::size_t j = (i + 1) & mask_;
+        while (slots_[j].state) {
+            const std::size_t h = hash_idx(slots_[j].key);
+            if (((i - h) & mask_) < ((j - h) & mask_)) {
+                slots_[i] = std::move(slots_[j]);
+                slots_[j].state = EMPTY;
+                i = j;
+            }
+            j = (j + 1) & mask_;
+        }
+    }
+
+    void init(std::size_t cap, uint32_t log2) {
+        slots_.assign(cap, Slot{});
+        mask_    = cap - 1;
+        size_    = 0;
+        log2cap_ = log2;
+    }
+
+    // Double capacity, rebuild (called at 75% load — rare).
     void grow() {
-        ++log2cap_;
+        const uint32_t new_log2 = log2cap_ + 1;
         std::vector<Slot> old = std::move(slots_);
-        slots_.assign(std::size_t{1} << log2cap_, Slot{});
-        mask_       = slots_.size() - 1;
-        size_       = 0;
-        tombstones_ = 0;
+        init(std::size_t{1} << new_log2, new_log2);
         for (auto& s : old)
             if (s.state == OCCUPIED)
-                (*this)[s.key] = std::move(s.value);
+                insert_new(s.key) = std::move(s.value);
     }
 
     std::vector<Slot> slots_;
-    std::size_t       mask_{0};
+    std::size_t       mask_{255};
     std::size_t       size_{0};
-    std::size_t       tombstones_{0};
-    uint32_t          log2cap_{4};
+    uint32_t          log2cap_{8};
 };
 
 } // namespace msim
