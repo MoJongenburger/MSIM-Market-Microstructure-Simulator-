@@ -152,19 +152,17 @@ Qty MatchingEngine::available_liquidity(const Order& taker) const noexcept {
     for (auto it = book_.asks_.begin(); it != book_.asks_.end(); ++it) {
       const Price px = it->first;
       if (taker.type == OrderType::Limit && px > taker.price) break;
-      for (const auto& o : it->second.q) {
-        avail += o.qty;
-        if (avail >= taker.qty) return avail;
-      }
+      // Start from front_offset — skip consumed/tombstoned entries.
+      // total_qty already excludes tombstones so we can short-circuit.
+      avail += it->second.total_qty;
+      if (avail >= taker.qty) return avail;
     }
   } else {
     for (auto it = book_.bids_.begin(); it != book_.bids_.end(); ++it) {
       const Price px = it->first;
       if (taker.type == OrderType::Limit && px < taker.price) break;
-      for (const auto& o : it->second.q) {
-        avail += o.qty;
-        if (avail >= taker.qty) return avail;
-      }
+      avail += it->second.total_qty;
+      if (avail >= taker.qty) return avail;
     }
   }
   return avail;
@@ -369,7 +367,8 @@ void MatchingEngine::match_buy(MatchResult& out, Order& taker) {
 
     if (maker.qty == 0) {
       book_.erase_locator(maker.id);
-      ++lvl.front_offset;   // advance past consumed order (no pop_front needed)
+      ++lvl.front_offset;
+      --lvl.live_count;   // order fully consumed — no longer live
     }
     if (lvl.total_qty == 0) book_.asks_.erase(best_it);
   }
@@ -420,6 +419,7 @@ void MatchingEngine::match_sell(MatchResult& out, Order& taker) {
     if (maker.qty == 0) {
       book_.erase_locator(maker.id);
       ++lvl.front_offset;
+      --lvl.live_count;   // order fully consumed — no longer live
     }
     if (lvl.total_qty == 0) book_.bids_.erase(best_it);
   }
