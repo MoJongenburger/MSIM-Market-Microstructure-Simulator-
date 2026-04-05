@@ -32,14 +32,14 @@ bool OrderBook::add_resting_limit(Order o) {
     lvl.q.push_back(o);
     lvl.total_qty        += o.qty;
     ++lvl.live_count;
-    loc_[o.id]            = Locator{Side::Buy, o.price, idx};
+    loc_.insert_new(o.id) = Locator{Side::Buy, o.price, idx};
   } else {
     auto& lvl             = asks_[o.price];
     const auto idx = static_cast<uint32_t>(lvl.q.size());
     lvl.q.push_back(o);
     lvl.total_qty        += o.qty;
     ++lvl.live_count;
-    loc_[o.id]            = Locator{Side::Sell, o.price, idx};
+    loc_.insert_new(o.id) = Locator{Side::Sell, o.price, idx};
   }
   return true;
 }
