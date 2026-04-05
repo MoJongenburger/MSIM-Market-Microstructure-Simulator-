@@ -21,7 +21,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <optional>
-#include <unordered_map>
+#include "msim/flat_hash_map.hpp"
 #include <vector>
 
 #include "msim/flat_price_map.hpp"
@@ -98,12 +98,12 @@ class OrderBook {
   AskMap asks_;
 
   struct Locator {
-    Side        side{};
-    Price       price{};
-    std::size_t abs_idx{};
+    Side     side{};
+    Price    price{};
+    uint32_t abs_idx{};  // 4 B — no level will ever have >4B queued orders
   };
 
-  std::unordered_map<OrderId, Locator> loc_;
+  FlatHashMap<OrderId, Locator> loc_;
 
   bool would_cross(const Order& o) const noexcept;
 };
