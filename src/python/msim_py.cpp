@@ -584,8 +584,6 @@ PYBIND11_MODULE(_msim_core, m) {
             [](World& w, IAgent* agent) {
                 w.add_agent(std::unique_ptr<IAgent>(agent));
             },
-            py::arg("agent"), py::keep_alive<1, 2>());
-            },
             py::arg("agent"), py::keep_alive<1, 2>())
         .def("prefill_book",
             [](World& w, Price mid, int levels, Qty qty_per_level) {
