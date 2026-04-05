@@ -129,7 +129,6 @@ include(GoogleTest)
 gtest_discover_tests(msim_tests)
 
 # ---------------- Benchmarks ----------------
-# Some people accidentally create test/bench_engine.cpp instead of tests/bench_engine.cpp
 set(BENCH_SRC "")
 if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/bench_engine.cpp")
   set(BENCH_SRC "${CMAKE_CURRENT_SOURCE_DIR}/tests/bench_engine.cpp")
@@ -159,10 +158,22 @@ msim_enable_sanitizers(run_theory)
 
 # ── Python bindings (opt-in, does not affect existing CI) ──────────────────
 #
-# Build:   cmake -S . -B build -DMSIM_BUILD_PYTHON=ON
-#          cmake --build build --target _msim_core
+# Windows (x64 Native Tools Command Prompt for VS 2022):
+#   cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DMSIM_BUILD_PYTHON=ON -G "NMake Makefiles"
+#   cmake --build build
+#   setx PYTHONPATH "%CD%\src\python"
+#   (close and reopen prompt)
+#   python -c "import msim; print(msim.__version__)"
 #
-# Install: pip install -e ".[analysis]"   (from repo root, after building)
+# macOS / Linux:
+#   cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DMSIM_BUILD_PYTHON=ON
+#   cmake --build build
+#   export PYTHONPATH=$PWD/src/python
+#   python -c "import msim; print(msim.__version__)"
+#
+# The compiled extension (_msim_core.*.pyd / .so) is written directly into
+# src/python/msim/ so that `from ._msim_core import ...` in __init__.py
+# resolves without any manual copying or pip install.
 #
 option(MSIM_BUILD_PYTHON "Build pybind11 Python bindings" OFF)
 
@@ -177,19 +188,24 @@ if (MSIM_BUILD_PYTHON)
 
   pybind11_add_module(_msim_core src/python/msim_py.cpp)
   target_link_libraries(_msim_core PRIVATE msim)
-  target_include_directories(_msim_core PRIVATE
-      ${CMAKE_CURRENT_SOURCE_DIR}/include
+
+  # Write the extension directly into the Python package directory so that
+  # `from ._msim_core import ...` in src/python/msim/__init__.py works
+  # immediately after cmake --build, with no manual copying required.
+  set_target_properties(_msim_core PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/src/python/msim"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/src/python/msim"
   )
 
-  # Apply same warnings as the rest of the project (but not sanitizers —
-  # pybind11 modules are loaded at runtime and can't link the ASan runtime
-  # into a .so the same way executables do).
+  target_include_directories(_msim_core PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
+
   msim_set_warnings(_msim_core)
 
-  # After building, the .so sits in build/.  Point Python at it:
-  #   PYTHONPATH=build:python python python/examples/quickstart.py
   message(STATUS "Python bindings: ON  (_msim_core)")
-  message(STATUS "  After build, run:")
-  message(STATUS "    PYTHONPATH=build:python python python/examples/quickstart.py")
+  message(STATUS "  Extension will be written to: src/python/msim/")
+  message(STATUS "  After build, set PYTHONPATH to src/python and run:")
+  message(STATUS "    python -c \"import msim; print(msim.__version__)\"")
 
 endif()
