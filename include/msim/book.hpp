@@ -2,40 +2,20 @@
 // ============================================================
 // include/msim/book.hpp
 //
-// Performance changes vs previous version:
+// Performance change vs previous version:
 //
-//   Per-level queue: std::list → std::vector + front_offset
-//   --------------------------------------------------------
-//   std::list stores each Order in a separately-allocated heap
-//   node.  Even with OrderNodeAllocator, iterating the list
-//   during matching is pointer-chasing — each node's ->next
-//   could be in a different slab page.
+//   live_count in Level — O(1) order_count for depth()
+//   ---------------------------------------------------
+//   depth() previously computed the live (non-tombstone) order
+//   count by iterating from front_offset to q.size() — O(N)
+//   per level, where N = total orders ever queued including
+//   cancelled ones.  This caused BM_BookDepth_TopN to be
+//   2107 ns on Windows (was 90 ns on macOS).
 //
-//   std::vector<Order> stores all orders at a price level
-//   contiguously.  The matching inner loop becomes a sequential
-//   scan the hardware prefetcher can run at full speed.
-//
-//   Locator: Queue::iterator → abs_idx (std::size_t)
-//   -------------------------------------------------
-//   A list iterator is a pointer to a heap node.  With the
-//   vector-based queue we can't store an iterator (vector
-//   iterators are invalidated on push_back).  Instead we store
-//   abs_idx — the index into the vector at the time of insertion.
-//   abs_idx is stable: push_back may grow the vector (moving
-//   all elements) but indices do not change.
-//
-//   Cancel: tombstone instead of erase
-//   ------------------------------------
-//   Erasing from the middle of a vector is O(N).  Instead,
-//   cancel() sets Order::qty = 0 at abs_idx (a tombstone).
-//   match_buy / match_sell skip tombstones at the front of the
-//   queue before each match step — O(k) where k is the number
-//   of consecutive cancelled orders.  In practice k ~ 0-1.
-//   The level is erased from the FlatPriceMap only when
-//   total_qty reaches 0 (all live qty consumed or cancelled).
-//
-//   order_pool.hpp is no longer included — std::list and the
-//   slab allocator are no longer used.
+//   live_count tracks the number of non-tombstone orders at
+//   a price level.  It is incremented on add and decremented
+//   on cancel and on full consumption during matching.
+//   depth() reads live_count directly — O(1) per level.
 // ============================================================
 
 #include <algorithm>
@@ -86,7 +66,6 @@ class OrderBook {
   bool        empty(Side side)        const noexcept;
   std::size_t level_count(Side side)  const noexcept;
 
-  // O(1) top-of-book quantity — used by World::compute_imbalance().
   Qty best_bid_qty() const noexcept {
     return bids_.empty() ? Qty{0} : bids_.begin()->second.total_qty;
   }
@@ -105,16 +84,11 @@ class OrderBook {
  private:
   friend class MatchingEngine;
 
-  // ── Level ────────────────────────────────────────────────────────────────
-  // q           — all Orders ever pushed at this price (including tombstones).
-  // front_offset — index of the first entry that might be live.
-  //               Advances when the front order is fully matched.
-  // total_qty   — sum of live (non-tombstone) Order::qty values.
-  //               When this reaches 0, the level is erased from the map.
   struct Level {
     std::vector<Order> q{};
     std::size_t        front_offset{0};
     Qty                total_qty{};
+    uint32_t           live_count{0};  // non-tombstone orders; used by depth()
   };
 
   using BidMap = FlatPriceMap<Level, std::greater<Price>>;
@@ -123,10 +97,6 @@ class OrderBook {
   BidMap bids_;
   AskMap asks_;
 
-  // ── Locator ──────────────────────────────────────────────────────────────
-  // abs_idx is the index into Level::q at insertion time.
-  // It is stable across push_back-induced reallocations of q
-  // because we never erase or insert in the middle.
   struct Locator {
     Side        side{};
     Price       price{};
