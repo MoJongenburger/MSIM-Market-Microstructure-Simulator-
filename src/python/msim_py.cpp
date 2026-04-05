@@ -581,8 +581,10 @@ PYBIND11_MODULE(_msim_core, m) {
             return std::make_unique<World>(MatchingEngine{});
         }))
         .def("add_agent",
-            [](World& w, std::unique_ptr<IAgent> agent) {
-                w.add_agent(std::move(agent));
+            [](World& w, IAgent* agent) {
+                w.add_agent(std::unique_ptr<IAgent>(agent));
+            },
+            py::arg("agent"), py::keep_alive<1, 2>());
             },
             py::arg("agent"), py::keep_alive<1, 2>())
         .def("prefill_book",
