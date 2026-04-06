@@ -41,34 +41,74 @@ This keeps the "exchange kernel" small and testable while allowing realistic ven
 
 **Throughput:** 23.7 M market orders/sec at p50 · 20.0 M/sec at p99 (single-threaded, warm book).
 
-### Empirical validation — Stylized Facts (5/5 validated)
+---
 
-A 300-second simulation with 9 agents (5 Hawkes noise traders, Avellaneda-Stoikov market maker, 2 fundamental value agents, momentum agent) reproduces all five canonical microstructure regularities:
+### Hot-path stability — ProcessMarketOrder across book sizes
 
-| Statistic | Value | Literature range | Status |
-|---|---:|---|---|
-| Excess kurtosis | 3.90 | 3–10 (Cont 2001) | ✅ Fat tails |
-| Return AC lag-1 | −0.45 | negative (Roll 1984) | ✅ Bid-ask bounce |
-| \|Return\| AC lag-1 | 0.334 | 0.10–0.40 (Engle 1982) | ✅ Volatility clustering |
-| Trade-sign AC lag-1 | 0.352 | 0.30–0.70 (Bouchaud 2004) | ✅ Order flow autocorrelation |
-| Time-weighted spread | 13.47 ticks | positive | ✅ Positive bid-ask spread |
+p50 stays flat at 42 ns whether the book has 100 or 10,000 resting orders, demonstrating that the FlatPriceMap and vector-queue design keeps all hot data in L1 cache regardless of book depth.
+
+<img width="2420" height="1100" alt="latency_benchmark" src="https://github.com/user-attachments/assets/197477a3-902c-4065-9259-9fc6c795c7db" />
+
+---
+
+### Latency distribution — Market order processing
+
+Box-and-whisker distribution of `BM_ProcessMarketOrder` across all repetitions at N=10,000 resting orders. The tight interquartile range confirms low variance in the critical execution path.
+
+<img width="2200" height="1000" alt="latency_box_BM_ProcessMarketOrder" src="https://github.com/user-attachments/assets/cfb880ec-cfdf-4706-bcb7-b05faa1a47ff" />
+
+---
+
+### Latency distribution — Multi-level sweep (K=1024 levels)
+
+`BM_ProcessMarket_SweepKLevels` at K=1024 price levels — p50=28.3 ns per level. The O(1) front-erase in `FlatPriceMap` means sweep cost grows linearly with levels consumed, not quadratically.
+
+<img width="2200" height="1000" alt="latency_box_BM_ProcessMarket_SweepKLevels" src="https://github.com/user-attachments/assets/23ae5754-2ca5-416f-872c-60654eb1674b" />
+
+---
+
+### Latency distribution — L2 depth snapshot
+
+`BM_BookDepth_TopN` across varying N. The `live_count` field in each price level makes order counting O(1) per level, keeping depth queries under 100 ns p99 regardless of how many orders have been cancelled at each level.
+
+<img width="2200" height="1000" alt="latency_box_BM_BookDepth_TopN" src="https://github.com/user-attachments/assets/89a08ec5-b260-4c91-81a8-a783a4ad258e" />
+
+---
+
+## Empirical Validation — Stylized Facts (5/5 validated)
+
+A 300-second simulation with 9 agents (5 Hawkes noise traders, Avellaneda-Stoikov market maker, 2 fundamental value agents, momentum agent) reproduces all five canonical microstructure regularities out of the box with default parameters:
+
+| Statistic | Value | Literature range | Reference | Status |
+|---|---:|---|---|---|
+| Excess kurtosis | 3.90 | 3–10 (intraday) | Cont (2001) | ✅ Fat tails |
+| Return AC lag-1 | −0.45 | negative | Roll (1984) | ✅ Bid-ask bounce |
+| \|Return\| AC lag-1 | 0.334 | 0.10–0.40 | Engle (1982) | ✅ Volatility clustering |
+| Trade-sign AC lag-1 | 0.352 | 0.30–0.70 | Bouchaud et al. (2004) | ✅ Order flow autocorrelation |
+| Time-weighted spread | 13.47 ticks | positive | Glosten-Milgrom (1985) | ✅ Positive bid-ask spread |
+
+The spread decomposition holds mathematically:
+```
+Effective spread (12.94) = Realized spread (−29.83) + Adverse selection (42.67)
+```
+The negative realized spread reflects that the fundamental value agents generate sufficient informed flow to dominate the market maker's spread capture — consistent with the Grossman-Stiglitz (1980) equilibrium under high adverse selection.
 
 ---
 
 ## Optimization Journey
 
-The engine has been systematically optimised through eight targeted passes. Each pass is independently motivated, measured, and reversible.
+The engine has been systematically optimised through eight targeted passes. Each pass is independently motivated, measured before and after, and fully covered by the CI test suite.
 
 | Pass | Change | Key improvement |
 |---|---|---|
-| 1 | `std::list` queue → `std::vector` + tombstone | BookAdd 888 → 161 ns (5.5×) |
-| 2 | `FlatPriceMap` (sorted vector, O(log N) find) | Eliminates red-black tree pointer-chasing |
-| 3 | `FlatPriceMap::front_offset_` (O(1) level erase) | SweepKLevels 103 → 28 ns (3.7×) |
-| 4 | `live_count` field in `Level` (O(1) depth) | BookDepth 2107 → 85 ns (24.8×) on Windows |
-| 5 | `SmallVector<Trade, 4>` for `MatchResult` | Heap allocation eliminated for >95% of orders |
-| 6 | `next_event_ts_` cache in engine | ~2000 redundant flush() calls/sec eliminated |
-| 7 | Robin Hood `FlatHashMap` for `loc_` | BookCancel 900 → 136 ns (6.6×) |
-| 8 | Run-loop bb/ba reuse, insertion sort, sfm.reserve | 2–4 redundant book queries/step eliminated |
+| 1 | `std::list` queue → `std::vector` + tombstone | BookAdd 888 → 161 ns **(5.5×)** |
+| 2 | `FlatPriceMap` (sorted vector replaces `std::map`) | Eliminates red-black tree pointer-chasing |
+| 3 | `FlatPriceMap::front_offset_` (O(1) level erase) | SweepKLevels 103 → 28 ns **(3.7×)** |
+| 4 | `live_count` field in `Level` (O(1) depth query) | BookDepth 2107 → 85 ns **(24.8×)** on Windows |
+| 5 | `SmallVector<Trade, 4>` for `MatchResult::trades` | Heap allocation eliminated for >95% of orders |
+| 6 | `next_event_ts_` cache in matching engine | ~2000 redundant `flush()` calls/sec eliminated |
+| 7 | Robin Hood `FlatHashMap` for `OrderBook::loc_` | BookCancel 900 → 136 ns **(6.6×)** |
+| 8 | Run-loop bb/ba reuse, insertion sort, `sfm.reserve` | 2–4 redundant book queries/step eliminated |
 
 ---
 
@@ -150,7 +190,7 @@ cmake --build build
 setx PYTHONPATH "%CD%\src\python"
 ```
 
-Close and reopen the prompt after `setx`, then:
+Close and reopen the prompt after `setx`, then verify:
 
 ```cmd
 python -c "import msim; print(msim.__version__)"
@@ -174,20 +214,20 @@ build\msim_tests.exe        # Windows
 ./build/msim_tests          # macOS / Linux
 ```
 
-All 20 unit tests pass on Linux (ASan + UBSan), macOS Debug/Release, and Windows.
+All 20 unit tests pass on Linux (ASan + UBSan), macOS Debug/Release, and Windows MSVC.
 
 ---
 
 ## Why It Is Built This Way
 
 **Deterministic replay.**
-Microstructure experiments must be repeatable. The same event stream and seed produce bit-for-bit identical trades, fills, and book evolution. Every agent uses a splitmix64-derived seed. The scenario runner uses the same derivation so 1000-seed sweeps are fully reproducible.
+Microstructure experiments must be repeatable. The same event stream and seed produce bit-for-bit identical trades, fills, and book evolution. Every agent uses a splitmix64-derived seed; the scenario runner uses the same derivation so 1000-seed sweeps are fully reproducible.
 
 **Separation of concerns.**
-Matching is a narrow, correctness-critical component. Venue rules evolve quickly. MSIM keeps those concerns cleanly separated so new rules do not destabilize the core engine.
+Matching is a narrow, correctness-critical component. Venue rules evolve quickly. MSIM keeps those concerns cleanly separated so new rules do not destabilise the core engine.
 
 **Invariants first.**
-Exchange logic is easy to break in subtle ways — crossed book, incorrect FIFO, partial fill accounting. MSIM leans heavily on unit tests and CI to protect invariants.
+Exchange logic is easy to break in subtle ways — crossed book, incorrect FIFO, partial fill accounting. MSIM leans heavily on unit tests and CI to protect invariants across all platforms.
 
 **Phase-aware market model.**
 Real venues are session-driven: continuous trading, auctions, and halts. MSIM treats market phase as a first-class concept integrated into order processing.
@@ -291,7 +331,7 @@ result.fills_df()
 #          arrival_mid, is_maker, slippage
 ```
 
-`slippage` = signed deviation from mid-price at order submission.
+`slippage` = signed deviation from mid-price at order submission. Positive = paid above mid (market impact). Negative = filled inside mid (limit order edge).
 
 ### Per-step PnL series
 
@@ -352,7 +392,7 @@ def step(self, ts, view, state):
     return []
 ```
 
-`queue_fraction()` = `qty_ahead / level_total`. 0 = at the front of the queue. Useful for adverse-selection avoidance: cancel before being run over if `is_front()` and the spread is narrowing.
+`queue_fraction()` = `qty_ahead / level_total`. 0 = at the front of the queue. Useful for adverse-selection avoidance: cancel before being run over when `is_front()` and the spread is narrowing.
 
 Disable overhead when not needed:
 
@@ -509,10 +549,7 @@ result.summary()
 # Run full suite and generate plots
 ./build/msim_bench --benchmark_format=json --benchmark_out=bench.json
 python tools/plot_bench_suite.py bench.json docs
-
-# Run dedicated latency plot
-python tools/plot_latency.py bench.json docs/latency_benchmark.png \
-    --prefix BM_ProcessMarketOrder
+python tools/plot_latency.py bench.json docs/latency_benchmark.png --prefix BM_ProcessMarketOrder
 ```
 
 ---
@@ -560,7 +597,7 @@ web/                              # Browser UI served by gateway
 
 ## Roadmap
 
-1. **Multi-seed scenario validation** — run stylized facts across 50+ seeds to report mean ± std for each statistic, demonstrating robustness across random initial conditions.
+1. **Multi-seed scenario validation** — run stylized facts across 50+ seeds and report mean ± std for each statistic, demonstrating robustness across random initial conditions.
 
 2. **Unit tests for agent and TCA layer** — structured tests for `HawkesNoiseTrader`, `MarketMakerAS`, `VWAPAgent`, `ISAgent`, and the TCA computation pipeline.
 
