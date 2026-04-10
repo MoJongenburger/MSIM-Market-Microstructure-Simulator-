@@ -117,7 +117,7 @@ class MatchingEngine {
 
   void  match_buy (MatchResult& out, Order& taker);
   void  match_sell(MatchResult& out, Order& taker);
-  Trade make_trade(Ts ts, Price px, Qty q, OrderId maker, OrderId taker);
+  Trade make_trade(Ts ts, Price px, Qty q, OrderId maker, OrderId taker, Side aggressor);
 };
 
 }  // namespace msim
