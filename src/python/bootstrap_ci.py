@@ -83,14 +83,9 @@ import math
 prices  = [t.price for t in trades]
 returns = [math.log(prices[i] / prices[i-1]) for i in range(1, len(prices))]
 
-# Tick rule: sign of price change as trade-direction proxy (Lee & Ready 1991).
-# Unchanged price carries forward the previous sign.
-signs, last = [], 1
-for i in range(1, len(prices)):
-    dp = prices[i] - prices[i-1]
-    if dp > 0:   last = 1
-    elif dp < 0: last = -1
-    signs.append(last)
+
+signs = [1 if t.aggressor_side.name == 'Buy' else -1 for t in trades[1:]]
+
 
 print(f"\nStep 2: Bootstrap resampling ({N_BOOTSTRAP} resamples)...")
 
