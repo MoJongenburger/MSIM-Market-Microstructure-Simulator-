@@ -134,7 +134,7 @@ std::vector<Trade> MatchingEngine::flush(Ts ts) {
 
 // ── make_trade ───────────────────────────────────────────────────────────────
 Trade MatchingEngine::make_trade(Ts ts, Price px, Qty q,
-                                  OrderId maker, OrderId taker) {
+                                  OrderId maker, OrderId taker, Side aggressor) {
   Trade t{};
   t.id             = next_trade_id_++;
   t.ts             = ts;
@@ -142,6 +142,7 @@ Trade MatchingEngine::make_trade(Ts ts, Price px, Qty q,
   t.qty            = q;
   t.maker_order_id = maker;
   t.taker_order_id = taker;
+  t.aggressor_side = aggressor;
   return t;
 }
 
