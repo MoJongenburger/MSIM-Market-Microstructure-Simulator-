@@ -157,7 +157,8 @@ PYBIND11_MODULE(_msim_core, m) {
         .def_readwrite("qty",            &Trade::qty)
         .def_readwrite("maker_order_id", &Trade::maker_order_id)
         .def_readwrite("taker_order_id", &Trade::taker_order_id)
-        .def("__repr__", [](const Trade& t) {
+.def_readwrite("aggressor_side", &Trade::aggressor_side)
+.def("__repr__", [](const Trade& t) {
             return "<Trade ts=" + std::to_string(t.ts)
                  + " px=" + std::to_string(t.price)
                  + " qty=" + std::to_string(t.qty) + ">";
@@ -413,7 +414,8 @@ PYBIND11_MODULE(_msim_core, m) {
                 row["qty"]            = t.qty;
                 row["maker_order_id"] = t.maker_order_id;
                 row["taker_order_id"] = t.taker_order_id;
-                rows.append(row);
+                row["aggressor_side"] = (t.aggressor_side == Side::Buy ? "Buy" : "Sell");
+            rows.append(row);
             }
             return pd.attr("DataFrame")(rows);
         })
