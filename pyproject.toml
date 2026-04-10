@@ -41,4 +41,4 @@ Issues     = "https://github.com/MoJongenburger/MSIM-Market-Microstructure-Simul
 [tool.scikit-build]
 cmake.args   = ["-DMSIM_BUILD_PYTHON=ON"]
 cmake.build-type = "Release"
-wheel.packages = ["python/msim"]
+wheel.packages = ["src/python/msim"]
