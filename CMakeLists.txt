@@ -110,16 +110,8 @@ msim_enable_sanitizers(msim_gateway)
 include(CTest)
 enable_testing()
 
-add_executable(msim_tests
-  tests/test_types.cpp
-  tests/test_book.cpp
-  tests/test_matching.cpp
-  tests/test_cancel_modify.cpp
-  tests/test_simulator.cpp
-  tests/test_rules.cpp
-  tests/test_order_types.cpp
-  tests/test_agents_smoke.cpp
-)
+file(GLOB TEST_SOURCES tests/test_*.cpp)
+add_executable(msim_tests ${TEST_SOURCES})
 
 target_link_libraries(msim_tests PRIVATE msim GTest::gtest_main)
 msim_set_warnings(msim_tests)
@@ -151,10 +143,10 @@ target_link_libraries(msim_bench PRIVATE msim benchmark::benchmark benchmark::be
 msim_set_warnings(msim_bench)
 msim_enable_sanitizers(msim_bench)
 
-add_executable(run_theory src/run_theory.cpp)
-target_link_libraries(run_theory PRIVATE msim)
-msim_set_warnings(run_theory)
-msim_enable_sanitizers(run_theory)
+add_executable(run_extended src/run_extended.cpp)
+target_link_libraries(run_extended PRIVATE msim)
+msim_set_warnings(run_extended)
+msim_enable_sanitizers(run_extended)
 
 # ── Python bindings (opt-in, does not affect existing CI) ──────────────────
 #
