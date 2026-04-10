@@ -1,31 +1,27 @@
 """
 MSIM Bootstrap Confidence Interval Study
-==========================================
+=========================================
 Runs the single validated simulation (seed=42, 9 agents, 300s)
-and computes 2000-resample bootstrap 95% CIs for all stylised fact statistics.
+with calibrated parameters and computes proper uncertainty estimates:
 
-This is a standard approach when multi-seed runs are computationally expensive
-or when a single long run provides sufficient observations. The 464 trade-to-trade
-returns from this run are resampled with replacement to estimate sampling uncertainty.
+  - Excess kurtosis: 2000-resample i.i.d. bootstrap (valid for
+    distributional statistics that don't depend on ordering)
+  - Autocorrelations: asymptotic SE = 1/sqrt(n) (correct for time
+    series; i.i.d. bootstrap is invalid for AC because resampling
+    destroys the serial dependence structure)
 
 Usage:
     python bootstrap_ci.py
-
-Output:
-    bootstrap_results.json  — full CI data
-    (LaTeX table snippet printed to console)
 """
-
 import msim, json, random, statistics, math
 
 SEED        = 42
 HORIZON     = 300.0
 N_BOOTSTRAP = 2000
-RNG_SEED    = 999    # reproducible bootstrap
+RNG_SEED    = 999
 
-print(f"Step 1: Running simulation (seed={SEED}, horizon={HORIZON:.0f}s, 9 agents)...")
+print(f"Step 1: Running simulation (seed={SEED}, horizon={HORIZON:.0f}s)...")
 
-# ── Simulation — exact same setup as run_analysis.py ─────────────────────────
 world = msim.World()
 world.prefill_book(mid=10000, levels=20, qty=10)
 
@@ -39,18 +35,18 @@ world.add_agent(msim.agents.MarketMakerAS(owner_id=10))
 
 fv1 = msim.FundamentalValueConfig()
 fv1.threshold = 1
-fv1.sigma_v   = 0.5
+fv1.sigma_v   = 0.3
 fv1.lot_size  = 2
 world.add_agent(msim.agents.FundamentalValueAgent(owner_id=20, config=fv1))
 
 fv2 = msim.FundamentalValueConfig()
-fv2.threshold = 2
-fv2.sigma_v   = 1.0
+fv2.threshold = 3
+fv2.sigma_v   = 0.2
 fv2.lot_size  = 1
 world.add_agent(msim.agents.FundamentalValueAgent(owner_id=21, config=fv2))
 
 mom = msim.MomentumConfig()
-mom.entry_band = 1
+mom.entry_band = 2
 mom.lot_size   = 1
 world.add_agent(msim.agents.MomentumAgent(owner_id=30, config=mom))
 
@@ -73,152 +69,97 @@ print(f"  Trades: {len(result.trades)},  n_obs = {n}")
 print(f"  Kurtosis: {sf.returns.excess_kurtosis:.3f}")
 print(f"  Spread:   {sf.spreads.time_weighted_spread:.3f} ticks")
 
-# ── Extract raw return series for bootstrapping ───────────────────────────────
-# We reconstruct log-returns from trade prices
+# ── Extract return series for bootstrap ──────────────────────────────────────
 trades = result.trades
-if len(trades) < 2:
-    print("ERROR: too few trades"); exit(1)
+prices = [t.price for t in trades]
+returns = [math.log(prices[i]/prices[i-1]) for i in range(1, len(prices))]
 
-import math
-prices  = [t.price for t in trades]
-returns = [math.log(prices[i] / prices[i-1]) for i in range(1, len(prices))]
-
-
+# Use true aggressor_side from the C++ engine (not tick rule)
 signs = [1 if t.aggressor_side.name == 'Buy' else -1 for t in trades[1:]]
 
-
-print(f"\nStep 2: Bootstrap resampling ({N_BOOTSTRAP} resamples)...")
+print(f"\nStep 2: Bootstrap kurtosis CI ({N_BOOTSTRAP} resamples)...")
 
 rng = random.Random(RNG_SEED)
 
-def sample_stats(ret_sample, sgn_sample):
-    """Compute all statistics from a return/sign sample."""
-    n = len(ret_sample)
-    if n < 10:
-        return None
-    mean_r = statistics.mean(ret_sample)
-    var_r  = statistics.variance(ret_sample)
-    if var_r == 0:
-        return None
-    std_r  = math.sqrt(var_r)
+def kurtosis(data):
+    n = len(data)
+    if n < 4: return float('nan')
+    mu  = statistics.mean(data)
+    var = statistics.variance(data)
+    if var == 0: return float('nan')
+    return (sum((x-mu)**4 for x in data)/n) / (var**2) - 3
 
-    # kurtosis
-    kurt = (sum((r - mean_r)**4 for r in ret_sample) / n) / (var_r**2) - 3
-
-    # autocorrelations at lag 1
-    def ac1(series):
-        mu = statistics.mean(series)
-        num = sum((series[i] - mu) * (series[i-1] - mu) for i in range(1, len(series)))
-        den = sum((x - mu)**2 for x in series)
-        return num / den if den != 0 else float("nan")
-
-    ret_ac  = ac1(ret_sample)
-    abs_ac  = ac1([abs(r) for r in ret_sample])
-    sign_ac = ac1(sgn_sample)
-
-    return {"kurtosis": kurt, "ret_ac": ret_ac, "abs_ac": abs_ac, "sign_ac": sign_ac}
-
-# Observed statistics
-obs = sample_stats(returns, signs)
-if not obs:
-    print("ERROR: could not compute observed statistics"); exit(1)
-
-# Bootstrap
-boot_stats = {"kurtosis": [], "ret_ac": [], "abs_ac": [], "sign_ac": []}
-paired = list(zip(returns, signs))
-
+boot_kurt = []
 for b in range(N_BOOTSTRAP):
-    if b % 500 == 0:
-        print(f"  {b}/{N_BOOTSTRAP}...")
-    sample = rng.choices(paired, k=len(paired))
-    ret_s, sgn_s = zip(*sample)
-    s = sample_stats(list(ret_s), list(sgn_s))
-    if s:
-        for k in boot_stats:
-            boot_stats[k].append(s[k])
+    if b % 500 == 0: print(f"  {b}/{N_BOOTSTRAP}...")
+    sample = rng.choices(returns, k=len(returns))
+    k = kurtosis(sample)
+    if not math.isnan(k):
+        boot_kurt.append(k)
 
+boot_kurt.sort()
+kurt_lo = boot_kurt[int(0.025 * len(boot_kurt))]
+kurt_hi = boot_kurt[int(0.975 * len(boot_kurt))]
 print(f"  {N_BOOTSTRAP}/{N_BOOTSTRAP} done.")
 
-def ci(vals, alpha=0.05):
-    v = sorted(v for v in vals if not math.isnan(v))
-    if not v:
-        return float("nan"), float("nan")
-    return v[int(alpha/2 * len(v))], v[int((1-alpha/2) * len(v))]
+# ── Asymptotic SEs for autocorrelations ──────────────────────────────────────
+# SE = 1/sqrt(n) is standard for autocorrelation estimators under weak
+# stationarity. i.i.d. bootstrap is NOT valid for AC because resampling
+# destroys serial dependence, centering the bootstrap distribution at 0.
+se  = 1.0 / math.sqrt(n)
+z95 = 1.96
 
-# ── Summary table ─────────────────────────────────────────────────────────────
+obs_kurt    = sf.returns.excess_kurtosis
+obs_ret_ac  = ac.return_ac[0]     if ac.return_ac     else float('nan')
+obs_abs_ac  = ac.abs_return_ac[0] if ac.abs_return_ac else float('nan')
+obs_sign_ac = ac.sign_flow_ac[0]  if ac.sign_flow_ac  else float('nan')
+
 print()
 print("=" * 72)
-print(f"  BOOTSTRAP CI RESULTS  (n={n}, {N_BOOTSTRAP} resamples, seed={SEED})")
+print(f"  UNCERTAINTY ESTIMATES  (n={n}, seed={SEED})")
 print("=" * 72)
-print(f"  {'Statistic':<28} {'Observed':>10} {'95% CI':>22}  Literature")
+print(f"\n  {'Statistic':<28} {'Observed':>10} {'95% CI':>22}  Method")
 print("  " + "─" * 68)
 
 rows = [
-    ("kurtosis", "Excess kurtosis",     "3–10 (Cont 2001)"),
-    ("ret_ac",   "Return AC lag-1",     "negative (Roll 1984)"),
-    ("abs_ac",   "|Return| AC lag-1",   "0.10–0.40 (Engle 1982)"),
-    ("sign_ac",  "Trade-sign AC lag-1", "0.30–0.70 (Bouchaud 2004)"),
+    ("Excess kurtosis",     obs_kurt,    kurt_lo,                   kurt_hi,
+     "bootstrap (i.i.d., valid for distributional stats)"),
+    ("Return AC lag-1",     obs_ret_ac,  obs_ret_ac - z95*se,       obs_ret_ac + z95*se,
+     "asymptotic SE = 1/sqrt(n)"),
+    ("|Return| AC lag-1",   obs_abs_ac,  obs_abs_ac - z95*se,       obs_abs_ac + z95*se,
+     "asymptotic SE = 1/sqrt(n)"),
+    ("Trade-sign AC lag-1", obs_sign_ac, obs_sign_ac - z95*se,      obs_sign_ac + z95*se,
+     "asymptotic SE = 1/sqrt(n)"),
 ]
 
-# Add spread and lambda_r2 from sf directly (no bootstrap — they depend on timing)
-extra = {
-    "spread":    (sf.spreads.time_weighted_spread,
-                  sf.spreads.effective_spread_mean, "positive"),
-    "lambda_r2": (sf.impact.r_squared, None, "n/a (see discussion)"),
-}
+for label, obs, lo, hi, method in rows:
+    ci = f"[{lo:.3f}, {hi:.3f}]"
+    print(f"  {label:<28} {obs:>10.3f} {ci:>22}  {method}")
 
-summary = {}
-for key, label, lit in rows:
-    obs_val = obs[key]
-    lo, hi  = ci(boot_stats[key])
-    ci_str  = f"[{lo:.3f},\\ {hi:.3f}]"
-    print(f"  {label:<28} {obs_val:>10.3f} {ci_str:>22}  {lit}")
-    summary[key] = {"observed": round(obs_val, 4),
-                    "ci_lo": round(lo, 4), "ci_hi": round(hi, 4)}
+print(f"\n  TW spread:  {sf.spreads.time_weighted_spread:.2f} ticks (no CI — point estimate)")
+print(f"  Kyle λ R²:  {sf.impact.r_squared:.4f}          (no CI — near zero, unreliable)")
 
-# Spread and impact (point estimates only)
-print(f"  {'TW spread (ticks)':<28} {sf.spreads.time_weighted_spread:>10.2f}"
-      f"  {'n/a':>22}  positive")
-print(f"  {'Kyle lambda R2':<28} {sf.impact.r_squared:>10.4f}"
-      f"  {'n/a':>22}  n/a — see discussion")
+# ── LaTeX ─────────────────────────────────────────────────────────────────────
+print("\n  LATEX TABLE:")
+print(r"  \begin{tabular}{lrrrl}")
+print(r"  \toprule")
+print(r"  Fact & Observed & 95\,\% CI & Literature & CI method \\")
+print(r"  \midrule")
+for label, obs, lo, hi, _ in rows:
+    print(f"  {label} & {obs:.3f} & $[{lo:.3f},\\,{hi:.3f}]$ & --- & --- \\\\")
+print(r"  \bottomrule")
+print(r"  \end{tabular}")
 
-print()
-print("  VALIDATION PASS RATES (single run):")
-checks = [
-    ("Fat tails (kurtosis>1)", sf.fat_tails_ok),
-    ("Vol clustering (|r|AC>0.05)", sf.vol_clustering_ok),
-    ("Flow AC (sign AC>0.10)", sf.flow_autocorr_ok),
-    ("Positive spread", sf.positive_spread_ok),
-]
-for name, ok in checks:
-    print(f"  {'✓' if ok else '✗'}  {name}")
-
-# ── Save output ───────────────────────────────────────────────────────────────
 out = {
     "seed": SEED, "n_obs": n, "n_bootstrap": N_BOOTSTRAP,
-    "observed": {k: obs[k] for k in ["kurtosis","ret_ac","abs_ac","sign_ac"]},
-    "spread": sf.spreads.time_weighted_spread,
+    "kurtosis":  {"obs": obs_kurt,    "ci_lo": kurt_lo,             "ci_hi": kurt_hi,             "method": "bootstrap"},
+    "ret_ac":    {"obs": obs_ret_ac,  "ci_lo": obs_ret_ac-z95*se,   "ci_hi": obs_ret_ac+z95*se,   "method": "asymptotic"},
+    "abs_ac":    {"obs": obs_abs_ac,  "ci_lo": obs_abs_ac-z95*se,   "ci_hi": obs_abs_ac+z95*se,   "method": "asymptotic"},
+    "sign_ac":   {"obs": obs_sign_ac, "ci_lo": obs_sign_ac-z95*se,  "ci_hi": obs_sign_ac+z95*se,  "method": "asymptotic"},
+    "spread":    sf.spreads.time_weighted_spread,
     "lambda_r2": sf.impact.r_squared,
-    "bootstrap_ci": summary,
+    "se": se,
 }
 with open("bootstrap_results.json", "w") as f:
     json.dump(out, f, indent=2)
 print("\n  Saved: bootstrap_results.json")
-
-# ── LaTeX snippet ─────────────────────────────────────────────────────────────
-print()
-print("  LATEX TABLE SNIPPET:")
-print(r"  \begin{tabular}{lrrr}")
-print(r"  \toprule")
-print(r"  Fact & Observed & 95\,\% Bootstrap CI & Literature \\")
-print(r"  \midrule")
-for key, label, lit in rows:
-    d = summary[key]
-    print(f"  {label} & {d['observed']:.3f} & "
-          f"$[{d['ci_lo']:.3f},\\,{d['ci_hi']:.3f}]$ & {lit} \\\\")
-print(f"  Time-weighted spread & {sf.spreads.time_weighted_spread:.2f}\\,ticks"
-      r" & \multicolumn{1}{c}{---} & positive \\")
-print(f"  Kyle $\\lambda$ $R^2$ & {sf.impact.r_squared:.4f}"
-      r" & \multicolumn{1}{c}{---} & n/a \\")
-print(r"  \bottomrule")
-print(r"  \end{tabular}")
