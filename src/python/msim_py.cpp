@@ -587,7 +587,7 @@ PYBIND11_MODULE(_msim_core, m) {
             py::arg("agent"), py::keep_alive<1, 2>())
         .def("prefill_book",
             [](World& w, Price mid, int levels, Qty qty_per_level) {
-                static uint64_t seed_id = 9000;
+                static uint64_t seed_id = 0xFFFF0000ULL; // avoids collision with agent-generated IDs
                 for (int i = 1; i <= levels; ++i) {
                     Order bid{};
                     bid.id        = seed_id++;
@@ -720,7 +720,7 @@ PYBIND11_MODULE(_msim_core, m) {
         "Built-in MSIM agent implementations.");
 
     py::class_<FundamentalValueAgent, IAgent,
-               std::unique_ptr<FundamentalValueAgent>>(agents,
+    std::unique_ptr<FundamentalValueAgent, py::nodelete>>(agents,
         "FundamentalValueAgent")
         .def(py::init<OwnerId, FundamentalValueConfig>(),
              py::arg("owner_id"),
@@ -728,7 +728,7 @@ PYBIND11_MODULE(_msim_core, m) {
         .def("fundamental_value", &FundamentalValueAgent::fundamental_value);
 
     py::class_<MomentumAgent, IAgent,
-               std::unique_ptr<MomentumAgent>>(agents, "MomentumAgent")
+    std::unique_ptr<MomentumAgent, py::nodelete>>(agents, "MomentumAgent")
         .def(py::init<OwnerId, MomentumConfig>(),
              py::arg("owner_id"),
              py::arg("config") = MomentumConfig{})
@@ -736,7 +736,7 @@ PYBIND11_MODULE(_msim_core, m) {
         .def("position", &MomentumAgent::position);
 
     py::class_<HawkesNoiseTrader, IAgent,
-               std::unique_ptr<HawkesNoiseTrader>>(agents, "HawkesNoiseTrader")
+    std::unique_ptr<HawkesNoiseTrader, py::nodelete>>(agents, "HawkesNoiseTrader")
         .def(py::init<OwnerId, HawkesNoiseConfig>(),
              py::arg("owner_id"),
              py::arg("config") = HawkesNoiseConfig{})
@@ -744,7 +744,7 @@ PYBIND11_MODULE(_msim_core, m) {
         .def("hawkes_mean_intensity", &HawkesNoiseTrader::hawkes_mean_intensity);
 
     py::class_<MarketMakerAS, IAgent,
-               std::unique_ptr<MarketMakerAS>>(agents, "MarketMakerAS")
+    std::unique_ptr<MarketMakerAS, py::nodelete>>(agents, "MarketMakerAS")
         .def(py::init<OwnerId, MarketMakerASConfig>(),
              py::arg("owner_id"),
              py::arg("config") = MarketMakerASConfig{})
@@ -752,7 +752,7 @@ PYBIND11_MODULE(_msim_core, m) {
         .def("has_resting", &MarketMakerAS::has_resting);
 
     py::class_<VWAPAgent, IAgent,
-               std::unique_ptr<VWAPAgent>>(agents, "VWAPAgent")
+    std::unique_ptr<VWAPAgent, py::nodelete>>(agents, "VWAPAgent")
         .def(py::init<OwnerId, VWAPConfig>(),
              py::arg("owner_id"),
              py::arg("config") = VWAPConfig{})
@@ -764,7 +764,7 @@ PYBIND11_MODULE(_msim_core, m) {
         .def("pct_complete",    &VWAPAgent::pct_complete);
 
     py::class_<TWAPAgent, IAgent,
-               std::unique_ptr<TWAPAgent>>(agents, "TWAPAgent")
+    std::unique_ptr<TWAPAgent, py::nodelete>>(agents, "TWAPAgent")
         .def(py::init<OwnerId, int, TWAPConfig>(),
              py::arg("owner_id"),
              py::arg("horizon_steps"),
@@ -776,7 +776,7 @@ PYBIND11_MODULE(_msim_core, m) {
         .def("pct_complete",  &TWAPAgent::pct_complete);
 
     py::class_<ISAgent, IAgent,
-               std::unique_ptr<ISAgent>>(agents, "ISAgent")
+    std::unique_ptr<ISAgent, py::nodelete>>(agents, "ISAgent")
         .def(py::init<OwnerId, int, ISConfig>(),
              py::arg("owner_id"),
              py::arg("horizon_steps"),
