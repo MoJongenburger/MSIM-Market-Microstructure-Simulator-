@@ -296,7 +296,7 @@ std::vector<Trade> MatchingEngine::uncross_auction(Ts uncross_ts) {
     if (b.qty <= 0) { ++i; continue; }
     if (s.qty <= 0) { ++j; continue; }
     const Qty q = std::min(b.qty, s.qty);
-    trades.push_back(make_trade(uncross_ts, clr, q, s.id, b.id));
+    trades.push_back(make_trade(uncross_ts, clr, q, s.id, b.id, Side::Buy));
     b.qty -= q; s.qty -= q;
   }
 
@@ -359,7 +359,7 @@ void MatchingEngine::match_buy(MatchResult& out, Order& taker) {
     auto& maker = lvl.q[lvl.front_offset];
     const Qty q = std::min(taker.qty, maker.qty);
 
-    out.trades.push_back(make_trade(taker.ts, best_ask_px, q, maker.id, taker.id));
+    out.trades.push_back(make_trade(taker.ts, best_ask_px, q, maker.id, taker.id, Side::Buy));
 
     taker.qty -= q;
     maker.qty -= q;
@@ -410,7 +410,7 @@ void MatchingEngine::match_sell(MatchResult& out, Order& taker) {
     auto& maker = lvl.q[lvl.front_offset];
     const Qty q = std::min(taker.qty, maker.qty);
 
-    out.trades.push_back(make_trade(taker.ts, best_bid_px, q, maker.id, taker.id));
+    out.trades.push_back(make_trade(taker.ts, best_bid_px, q, maker.id, taker.id, Side::Sell));
 
     taker.qty -= q;
     maker.qty -= q;
