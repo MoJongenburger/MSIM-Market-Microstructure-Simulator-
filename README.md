@@ -7,7 +7,7 @@
 ![Latency](https://img.shields.io/badge/Latency-p50%2042.2ns-brightgreen)
 ![Tail](https://img.shields.io/badge/Tail-p99%2049.9ns-brightgreen)
 ![Throughput](https://img.shields.io/badge/Throughput-23.7M%20ops%2Fs-blueviolet)
-![Stylized Facts](https://img.shields.io/badge/Stylized%20Facts-5%2F5%20validated-success)
+![Stylised Facts](https://img.shields.io/badge/Stylised%20Facts-4%2F5%20confirmed%2C%201%20emergent-blue)
 ![License](https://img.shields.io/github/license/MoJongenburger/MSIM-Market-Microstructure-Simulator-)
 
 MSIM is a deterministic, event-driven **limit order book + matching engine** written in modern **C++20**, built as a **microstructure research sandbox** for studying execution mechanics, venue rules, and agent interaction. It ships with a full **Python strategy interface** via pybind11, enabling researchers to write strategies in Python against the same sub-50 ns C++ engine.
@@ -75,7 +75,7 @@ Box-and-whisker distribution of `BM_ProcessMarketOrder` across all repetitions a
 
 ---
 
-## Empirical Validation — Stylized Facts (5/5 validated)
+## Empirical Validation — Stylised Facts (4/5 statistically confirmed, 1 qualitatively emergent)
 
 A 300-second simulation with 9 agents (5 Hawkes noise traders, Avellaneda-Stoikov market maker, 2 fundamental value agents, momentum agent) reproduces all five canonical microstructure regularities out of the box with default parameters:
 
@@ -87,6 +87,7 @@ A 300-second simulation with 9 agents (5 Hawkes noise traders, Avellaneda-Stoiko
 | Trade-sign AC lag-1 | 0.352 | 0.30–0.70 | Bouchaud et al. (2004) | ✅ Order flow autocorrelation |
 | Time-weighted spread | 13.47 ticks | positive | Glosten-Milgrom (1985) | ✅ Positive bid-ask spread |
 
+> **Note on price impact:** Kyle's λ is nonzero but R²≈0.001 at n=464, meaning the OLS regression has no statistical power. Price impact is listed as qualitatively emergent rather than formally validated. Reliable estimation requires n>2,000 trades.
 The spread decomposition holds mathematically:
 ```
 Effective spread (12.94) = Realized spread (−29.83) + Adverse selection (42.67)
