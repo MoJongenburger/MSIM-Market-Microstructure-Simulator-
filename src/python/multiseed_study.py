@@ -103,7 +103,8 @@ for key, label, lit in metrics:
     vals         = [r[key] for r in rows if r[key] is not None]
     mean, lo, hi = bootstrap_ci(vals)
     med          = statistics.median(vals) if vals else float("nan")
-    std          = statistics.stdev(vals) if len(vals) > 1 else 0
+    vals_clean   = [v for v in vals if not math.isnan(v)]
+    std          = statistics.stdev(vals_clean) if len(vals_clean) > 1 else 0
     summary[key] = {"mean": round(mean,4), "median": round(med,4),
                     "std": round(std,4), "ci_lo": round(lo,4), "ci_hi": round(hi,4)}
     print(f"  {label:<24} {mean:>8.3f} {med:>8.3f} {std:>7.3f} "
