@@ -4,13 +4,13 @@
 ![C++](https://img.shields.io/badge/C%2B%2B-20-blue)
 ![CMake](https://img.shields.io/badge/CMake-3.20%2B-064F8C)
 [![CI](https://github.com/MoJongenburger/MSIM-Market-Microstructure-Simulator-/actions/workflows/ci.yml/badge.svg)](https://github.com/MoJongenburger/MSIM-Market-Microstructure-Simulator-/actions/workflows/ci.yml)
-![Latency](https://img.shields.io/badge/Latency-p50%2042.2ns-brightgreen)
-![Tail](https://img.shields.io/badge/Tail-p99%2049.9ns-brightgreen)
-![Throughput](https://img.shields.io/badge/Throughput-23.7M%20ops%2Fs-blueviolet)
+![Latency](https://img.shields.io/badge/Latency-p50%2046.6ns-brightgreen)
+![Tail](https://img.shields.io/badge/Tail-p99%2047.1ns-brightgreen)
+![Throughput](https://img.shields.io/badge/Throughput-21.9M%20ops%2Fs-blueviolet)
 ![Stylised Facts](https://img.shields.io/badge/Stylised%20Facts-4%2F5%20confirmed%2C%201%20emergent-blue)
 ![License](https://img.shields.io/github/license/MoJongenburger/MSIM-Market-Microstructure-Simulator-)
 
-MSIM is a deterministic, event-driven **limit order book + matching engine** written in modern **C++20**, built as a **microstructure research sandbox** for studying execution mechanics, venue rules, and agent interaction. It ships with a full **Python strategy interface** via pybind11, enabling researchers to write strategies in Python against the same sub-50 ns C++ engine.
+MSIM is a deterministic, event-driven **limit order book + matching engine** written in modern **C++20**, built as a **microstructure research sandbox** for studying execution mechanics, venue rules, and agent interaction. It ships with a full **Python strategy interface** via pybind11, enabling researchers to write strategies in Python against the same sub-50 ns C++ engine (p50 = 46.6 ns, p99 = 47.1 ns on a commodity workstation).
 
 The project prioritises **reproducibility, correctness, and extensibility**. Its architecture separates:
 
@@ -29,23 +29,23 @@ This keeps the "exchange kernel" small and testable while allowing realistic ven
 
 | Benchmark | p50 (ns) | p90 (ns) | p99 (ns) | What it measures |
 |---|---:|---:|---:|---|
-| `BM_ProcessReject_InvalidQty` | 15.3 | 15.9 | 16.2 | Fast-path reject (invalid order) |
-| `BM_ProcessMarketOrder` | **42.2** | 45.2 | **49.9** | Market order hot path |
-| `BM_ProcessCrossingLimitIOC` | 47.4 | 50.7 | 50.7 | Crossing limit IOC |
-| `BM_Throughput_ProcessMarketOrder` | 45.9 | 47.4 | 47.7 | Sustained throughput loop |
-| `BM_ProcessMarket_SweepKLevels` | 28.3 | 30.1 | 32.5 | Per-level cost sweeping K=1024 levels |
-| `BM_BookDepth_TopN` | 85.1 | 94.7 | 99.8 | L2 depth snapshot (Top-N) |
-| `BM_BookCancel_O1` | 135.8 | 139.2 | 142.5 | Cancel a resting limit order |
-| `BM_BookAddRestingLimit` | 160.7 | 172.1 | 174.0 | Insert a resting limit order |
-| `BM_BookModifyQty_O1` | 238.0 | 249.0 | 255.4 | Reduce quantity of a resting order |
+| `BM_ProcessReject_InvalidQty` | 14.9 | 15.0 | 15.0 | Fast-path reject (invalid order) |
+| `BM_ProcessMarketOrder` | **46.6** | 47.0 | **47.1** | Market order hot path |
+| `BM_ProcessCrossingLimitIOC` | 46.8 | 47.4 | 48.0 | Crossing limit IOC |
+| `BM_Throughput_ProcessMarketOrder` | 45.7 | 46.0 | 46.4 | Sustained throughput loop |
+| `BM_ProcessMarket_SweepKLevels` | 26.3 | 26.6 | 26.9 | Per-level cost sweeping K=1024 levels |
+| `BM_BookDepth_TopN` | 84.0 | 86.9 | 88.6 | L2 depth snapshot (Top-N) |
+| `BM_BookCancel_O1` | 127.7 | 128.6 | 128.7 | Cancel a resting limit order |
+| `BM_BookAddRestingLimit` | 150.2 | 153.2 | 155.1 | Insert a resting limit order |
+| `BM_BookModifyQty_O1` | 221.8 | 223.6 | 224.5 | Reduce quantity of a resting order |
 
-**Throughput:** 23.7 M market orders/sec at p50 · 20.0 M/sec at p99 (single-threaded, warm book).
+**Throughput:** 21.9 M market orders/sec at p50 · 21.5 M/sec at p99 (single-threaded, warm book).
 
 ---
 
 ### Hot-path stability — ProcessMarketOrder across book sizes
 
-p50 stays flat at 42 ns whether the book has 100 or 10,000 resting orders, demonstrating that the FlatPriceMap and vector-queue design keeps all hot data in L1 cache regardless of book depth.
+p50 stays flat at ~47 ns whether the book has 100 or 10,000 resting orders, demonstrating that the FlatPriceMap and vector-queue design keeps all hot data in L1 cache regardless of book depth.
 
 <img width="2420" height="1100" alt="latency_benchmark" src="https://github.com/user-attachments/assets/197477a3-902c-4065-9259-9fc6c795c7db" />
 
@@ -81,11 +81,11 @@ A 300-second simulation with 9 agents (5 Hawkes noise traders, Avellaneda-Stoiko
 
 | Statistic | Value | Literature range | Reference | Status |
 |---|---:|---|---|---|
-| Excess kurtosis | 4.04 (median 7.04 / 50 seeds) | > 3 tick-level | Cont (2001) | ✅ Fat tails — 46/50 seeds |
-| Return AC lag-1 | −0.451 | negative | Roll (1984) | ✅ Bid-ask bounce — 47/48 seeds |
-| \|Return\| AC lag-1 | 0.323 | 0.10–0.40 | Engle (1982) | ✅ Vol clustering — 46/50 seeds |
-| Trade-sign AC lag-1 | 0.270 (median 0.327) | 0.30–0.70 | Bouchaud et al. (2004) | ✅ Flow AC — 50/50 seeds |
-| Time-weighted spread | 8.86 ticks (median 8.37) | positive | Glosten-Milgrom (1985) | ✅ Positive spread — 50/50 seeds |
+| Excess kurtosis | 4.04 (median 7.04 / 50 seeds) | > 3 tick-level | Cont (2001) | ✅ Fat tails — 46/48 seeds (96%) |
+| Return AC lag-1 | −0.451 | negative | Roll (1984) | ✅ Bid-ask bounce — 47/48 seeds (98%) |
+| \|Return\| AC lag-1 | 0.323 | 0.10–0.40 | Engle (1982) | ✅ Vol clustering — 44/48 seeds (92%) |
+| Trade-sign AC lag-1 | 0.270 (median 0.327) | 0.30–0.70 | Bouchaud et al. (2004) | ✅ Flow AC — 50/50 seeds (100%) |
+| Time-weighted spread | 8.86 ticks (median 8.35) | positive | Glosten-Milgrom (1985) | ✅ Positive spread — 49/50 seeds (98%) |
 
 > **Note on price impact:** Kyle's λ is nonzero but R²≈0.001 at n~800. The A-S market maker continuously re-prices quotes, attenuating the post-trade price drift that Kyle's λ captures — consistent with optimal market-maker behaviour. The near-zero R² is consistent across all 50 seeds (mean R²=0.003).
 The spread decomposition holds mathematically:
@@ -97,10 +97,10 @@ A 50-seed robustness study (`src/python/multiseed_study.py`) confirms these resu
 
 | Fact | Pass rate | Median |
 |---|---|---|
-| Fat tails (kurtosis > 3) | **46/50 (92%)** | kurtosis 7.04 |
-| Volatility clustering | **46/50 (92%)** | \|ret\| AC 0.212 |
+| Fat tails (kurtosis > 3) | **46/48 (96%)** | kurtosis 7.04 |
+| Volatility clustering | **44/48 (92%)** | \|ret\| AC 0.212 |
 | Flow autocorrelation | **50/50 (100%)** | sign AC 0.327 |
-| Positive spread | **50/50 (100%)** | 8.37 ticks |
+| Positive spread | **49/50 (98%)** | 8.35 ticks |
 | Return AC negative | **47/48 (98%)** | −0.317 |
 
 Kurtosis median of 7.04 falls within the [3,10] range of Cont (2001). Seeds with kurtosis > 10 exhibit genuine fat-tail behaviour from occasional informed-flow sweeps, consistent with real transaction-level LOB data.
@@ -116,10 +116,10 @@ The engine has been systematically optimised through eight targeted passes. Each
 | 1 | `std::list` queue → `std::vector` + tombstone | BookAdd 888 → 161 ns **(5.5×)** |
 | 2 | `FlatPriceMap` (sorted vector replaces `std::map`) | Eliminates red-black tree pointer-chasing |
 | 3 | `FlatPriceMap::front_offset_` (O(1) level erase) | SweepKLevels 103 → 28 ns **(3.7×)** |
-| 4 | `live_count` field in `Level` (O(1) depth query) | BookDepth 2107 → 85 ns **(24.8×)** on Windows |
+| 4 | `live_count` field in `Level` (O(1) depth query) | BookDepth 2107 → 84 ns **(25.1×)** on Windows |
 | 5 | `SmallVector<Trade, 4>` for `MatchResult::trades` | Heap allocation eliminated for >95% of orders |
 | 6 | `next_event_ts_` cache in matching engine | ~2000 redundant `flush()` calls/sec eliminated |
-| 7 | Robin Hood `FlatHashMap` for `OrderBook::loc_` | BookCancel 900 → 136 ns **(6.6×)** |
+| 7 | Robin Hood `FlatHashMap` for `OrderBook::loc_` | BookCancel 900 → 128 ns **(7.0×)** |
 | 8 | Run-loop bb/ba reuse, insertion sort, `sfm.reserve` | 2–4 redundant book queries/step eliminated |
 
 ---
@@ -461,7 +461,7 @@ Also computes Amihud illiquidity, effective/realized spread decomposition, and p
 ```
 === MSIM Stylized Facts Report ===
 
-Return Distribution (n=464):
+Return Distribution (n=773):
   Std dev:         0.000995
   Excess kurtosis: 4.04  [OK — fat tails]
 
@@ -631,7 +631,7 @@ web/                              # Browser UI served by gateway
 
 ## Roadmap
 
-1. ~~**Multi-seed scenario validation**~~ ✅ **DONE** — `src/python/multiseed_study.py` runs 50 subprocess-isolated seeds. Pass rates: fat tails 92%, vol clustering 92%, flow AC 100%, positive spread 100%.
+1. ~~**Multi-seed scenario validation**~~ ✅ **DONE** — `src/python/multiseed_study.py` runs 50 subprocess-isolated seeds. Pass rates: fat tails 96% (46/48), vol clustering 92% (44/48), flow AC 100% (50/50), positive spread 98% (49/50).
 
 2. **Unit tests for agent and TCA layer** — structured tests for `HawkesNoiseTrader`, `MarketMakerAS`, `VWAPAgent`, `ISAgent`, and the TCA computation pipeline.
 
