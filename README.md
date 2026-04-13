@@ -77,13 +77,13 @@ Box-and-whisker distribution of `BM_ProcessMarketOrder` across all repetitions a
 
 ## Empirical Validation — Stylised Facts
 
-A 300-second simulation with 9 agents (5 Hawkes noise traders, Avellaneda-Stoikov market maker, 2 fundamental value agents, momentum agent) demonstrates qualitative emergence of five canonical microstructure regularities. Four facts are confirmed at pass rates of 92–100% across 50 independent seeds (see Multi-Seed Robustness below); price impact is qualitatively emergent:
+A 300-second simulation with 9 agents (5 Hawkes noise traders, Avellaneda-Stoikov market maker, 2 fundamental value agents, momentum agent) demonstrates qualitative emergence of five canonical microstructure regularities. Four facts are confirmed at pass rates of 96–100% across 50 independent seeds (see Multi-Seed Robustness below); price impact is qualitatively emergent:
 
 | Statistic | Value | Literature range | Reference | Status |
 |---|---:|---|---|---|
 | Excess kurtosis | 4.04 (median 7.04 / 50 seeds) | > 3 tick-level | Cont (2001) | ✅ Fat tails — 46/48 seeds (96%) |
 | Return AC lag-1 | −0.451 | negative | Roll (1984) | ✅ Bid-ask bounce — 47/48 seeds (98%) |
-| \|Return\| AC lag-1 | 0.323 | 0.10–0.40 | Engle (1982) | ✅ Vol clustering — 44/48 seeds (92%) |
+| \|Return\| AC lag-1 | 0.323 | 0.10–0.40 | Engle (1982) | ✅ Vol clustering — 46/48 seeds (96%) |
 | Trade-sign AC lag-1 | 0.270 (median 0.327) | 0.30–0.70 | Bouchaud et al. (2004) | ✅ Flow AC — 50/50 seeds (100%) |
 | Time-weighted spread | 8.86 ticks (median 8.35) | positive | Glosten-Milgrom (1985) | ✅ Positive spread — 49/50 seeds (98%) |
 
@@ -631,7 +631,7 @@ web/                              # Browser UI served by gateway
 
 ## Roadmap
 
-1. ~~**Multi-seed scenario validation**~~ ✅ **DONE** — `src/python/multiseed_study.py` runs 50 subprocess-isolated seeds. Pass rates: fat tails 96% (46/48), vol clustering 92% (44/48), flow AC 100% (50/50), positive spread 98% (49/50).
+1. ~~**Multi-seed scenario validation**~~ ✅ **DONE** — `src/python/multiseed_study.py` runs 50 subprocess-isolated seeds. Pass rates: fat tails 96% (46/48), vol clustering 96% (46/48), flow AC 100% (50/50), positive spread 98% (49/50).
 
 2. **Unit tests for agent and TCA layer** — structured tests for `HawkesNoiseTrader`, `MarketMakerAS`, `VWAPAgent`, `ISAgent`, and the TCA computation pipeline.
 
