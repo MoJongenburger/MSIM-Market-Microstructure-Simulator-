@@ -61,7 +61,7 @@ Box-and-whisker distribution of `BM_ProcessMarketOrder` across all repetitions a
 
 ### Latency distribution — Multi-level sweep (K=1024 levels)
 
-`BM_ProcessMarket_SweepKLevels` at K=1024 price levels — p50=28.3 ns per level. The O(1) front-erase in `FlatPriceMap` means sweep cost grows linearly with levels consumed, not quadratically.
+`BM_ProcessMarket_SweepKLevels` at K=1024 price levels — p50=26.3 ns per level. The O(1) front-erase in `FlatPriceMap` means sweep cost grows linearly with levels consumed, not quadratically.
 
 <img width="2200" height="1000" alt="latency_box_BM_ProcessMarket_SweepKLevels" src="https://github.com/user-attachments/assets/23ae5754-2ca5-416f-872c-60654eb1674b" />
 
@@ -85,7 +85,7 @@ A 300-second simulation with 9 agents (5 Hawkes noise traders, Avellaneda-Stoiko
 | Return AC lag-1 | −0.451 | negative | Roll (1984) | ✅ Bid-ask bounce — 47/48 seeds (98%) |
 | \|Return\| AC lag-1 | 0.323 | 0.10–0.40 | Engle (1982) | ✅ Vol clustering — 46/48 seeds (96%) |
 | Trade-sign AC lag-1 | 0.270 (median 0.327) | 0.30–0.70 | Bouchaud et al. (2004) | ✅ Flow AC — 50/50 seeds (100%) |
-| Time-weighted spread | 8.86 ticks (median 8.35) | positive | Glosten-Milgrom (1985) | ✅ Positive spread — 49/50 seeds (98%) |
+| Time-weighted spread | 8.86 ticks (median 8.37) | positive | Glosten-Milgrom (1985) | ✅ Positive spread — 49/50 seeds (98%) |
 
 > **Note on price impact:** Kyle's λ is nonzero but R²≈0.001 at n~800. The A-S market maker continuously re-prices quotes, attenuating the post-trade price drift that Kyle's λ captures — consistent with optimal market-maker behaviour. The near-zero R² is consistent across all 50 seeds (mean R²=0.003).
 The spread decomposition holds mathematically:
@@ -98,9 +98,9 @@ A 50-seed robustness study (`src/python/multiseed_study.py`) confirms these resu
 | Fact | Pass rate | Median |
 |---|---|---|
 | Fat tails (kurtosis > 3) | **46/48 (96%)** | kurtosis 7.04 |
-| Volatility clustering | **44/48 (92%)** | \|ret\| AC 0.212 |
+| Volatility clustering | **46/48 (96%)** | \|ret\| AC 0.212 |
 | Flow autocorrelation | **50/50 (100%)** | sign AC 0.327 |
-| Positive spread | **49/50 (98%)** | 8.35 ticks |
+| Positive spread | **49/50 (98%)** | 8.37 ticks |
 | Return AC negative | **47/48 (98%)** | −0.317 |
 
 Kurtosis median of 7.04 falls within the [3,10] range of Cont (2001). Seeds with kurtosis > 10 exhibit genuine fat-tail behaviour from occasional informed-flow sweeps, consistent with real transaction-level LOB data.
@@ -561,6 +561,14 @@ python src\python\multiseed_study.py
 
 Runs 50 subprocess-isolated seeds and reports mean ± std with 95% bootstrap CIs for all five stylised facts. Results saved to `multiseed_results.csv` and `multiseed_summary.json`. Bootstrap CIs also computed by `src/python/bootstrap_ci.py`.
 
+### 5) PnL conservation check
+
+```cmd
+python src\python\pnl_conservation_check.py
+```
+
+Verifies that total mark-to-market PnL, cash PnL, and net position sum to zero across all agents — confirming the simulation is a closed zero-sum system.
+
 ---
 
 ## Benchmarks
@@ -621,6 +629,12 @@ web/                              # Browser UI served by gateway
 
 ## Engineering Notes
 
+### v1.2.2 — PnL conservation verified + paper sync
+
+- **Wealth conservation confirmed.** A full PnL audit (`src/python/pnl_conservation_check.py`) confirms the simulation is exactly zero-sum: total mark-to-market PnL, total cash PnL, and net position all sum to zero across all nine agents at every horizon. The system conserves wealth exactly.
+- **Paper synchronisation.** All benchmark and validation numbers in `paper/msim_paper.tex` updated to match `paper/data/` raw outputs. Appendix sweep table rebuilt from `benchmark_results.json`. Agent TCA table updated to current code output.
+- **README sync.** Volatility clustering corrected to 46/48 (96%), spread median to 8.37 ticks, sweep caption to 26.3 ns.
+
 ### v1.2.1 — Bug fixes
 
 - **Fixed double-free heap corruption in Python bindings.** Agent objects registered with `std::unique_ptr<T>` as the pybind11 holder type were deleted both by the C++ `World` destructor and by Python's garbage collector. Fixed by registering all built-in agent classes with `py::nodelete`, making C++ the sole owner. This fix enables multi-seed simulation from a single Python process.
@@ -631,7 +645,7 @@ web/                              # Browser UI served by gateway
 
 ## Roadmap
 
-1. ~~**Multi-seed scenario validation**~~ ✅ **DONE** — `src/python/multiseed_study.py` runs 50 subprocess-isolated seeds. Pass rates: fat tails 96% (46/48), vol clustering 96% (46/48), flow AC 100% (50/50), positive spread 98% (49/50).
+1. ~~**Multi-seed scenario validation**~~ ✅ **DONE** — `src/python/multiseed_study.py` runs 50 subprocess-isolated seeds. Pass rates: fat tails 96% (46/48), vol clustering 96% (46/48), flow AC 100% (50/50), positive spread 98% (49/50). PnL conservation verified: total system PnL = 0 exactly.
 
 2. **Unit tests for agent and TCA layer** — structured tests for `HawkesNoiseTrader`, `MarketMakerAS`, `VWAPAgent`, `ISAgent`, and the TCA computation pipeline.
 
