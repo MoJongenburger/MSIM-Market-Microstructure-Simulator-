@@ -475,7 +475,7 @@ Spread:
   Effective spread:      8.42 ticks
 
 Validation: Fat tails PASS | Vol clustering PASS | Flow autocorr PASS |
-            Positive spread PASS | Nonzero impact PASS
+            Positive spread PASS | Price impact INCONCLUSIVE (R²≈0.001)
 ```
 
 ---
@@ -621,7 +621,7 @@ web/                              # Browser UI served by gateway
 
 ## Engineering Notes
 
-### v0.1.1 — Bug fixes
+### v1.2.1 — Bug fixes
 
 - **Fixed double-free heap corruption in Python bindings.** Agent objects registered with `std::unique_ptr<T>` as the pybind11 holder type were deleted both by the C++ `World` destructor and by Python's garbage collector. Fixed by registering all built-in agent classes with `py::nodelete`, making C++ the sole owner. This fix enables multi-seed simulation from a single Python process.
 - **Added `aggressor_side` to `Trade`.** The matching engine now records whether each trade was buyer- or seller-initiated, exposed as `trade.aggressor_side` in Python (`'Buy'` or `'Sell'`). Also available in `result.trades_df()` as the `aggressor_side` column.
