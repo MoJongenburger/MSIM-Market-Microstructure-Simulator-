@@ -47,7 +47,7 @@ This keeps the "exchange kernel" small and testable while allowing realistic ven
 
 p50 stays flat at ~47 ns whether the book has 100 or 10,000 resting orders, demonstrating that the FlatPriceMap and vector-queue design keeps all hot data in L1 cache regardless of book depth.
 
-<img width="2420" height="1100" alt="latency_benchmark" src="https://github.com/user-attachments/assets/197477a3-902c-4065-9259-9fc6c795c7db" />
+<img width="2420" height="1100" alt="latency_benchmark" src="https://github.com/user-attachments/assets/0ccec0af-c51f-442a-864f-babff40d22c0" />
 
 ---
 
@@ -55,7 +55,7 @@ p50 stays flat at ~47 ns whether the book has 100 or 10,000 resting orders, demo
 
 Box-and-whisker distribution of `BM_ProcessMarketOrder` across all repetitions at N=10,000 resting orders. The tight interquartile range confirms low variance in the critical execution path.
 
-<img width="2200" height="1000" alt="latency_box_BM_ProcessMarketOrder" src="https://github.com/user-attachments/assets/cfb880ec-cfdf-4706-bcb7-b05faa1a47ff" />
+<img width="2200" height="1000" alt="latency_box_BM_ProcessMarketOrder" src="https://github.com/user-attachments/assets/223cdfe6-d6a3-40ec-bea1-af91342110d7" />
 
 ---
 
@@ -63,7 +63,7 @@ Box-and-whisker distribution of `BM_ProcessMarketOrder` across all repetitions a
 
 `BM_ProcessMarket_SweepKLevels` at K=1024 price levels — p50=26.3 ns per level. The O(1) front-erase in `FlatPriceMap` means sweep cost grows linearly with levels consumed, not quadratically.
 
-<img width="2200" height="1000" alt="latency_box_BM_ProcessMarket_SweepKLevels" src="https://github.com/user-attachments/assets/23ae5754-2ca5-416f-872c-60654eb1674b" />
+<img width="2200" height="1000" alt="latency_box_BM_ProcessMarket_SweepKLevels" src="https://github.com/user-attachments/assets/846e7a7a-291c-48d8-acef-d5562a11b2c7" />
 
 ---
 
@@ -71,7 +71,7 @@ Box-and-whisker distribution of `BM_ProcessMarketOrder` across all repetitions a
 
 `BM_BookDepth_TopN` across varying N. The `live_count` field in each price level makes order counting O(1) per level, keeping depth queries under 100 ns p99 regardless of how many orders have been cancelled at each level.
 
-<img width="2200" height="1000" alt="latency_box_BM_BookDepth_TopN" src="https://github.com/user-attachments/assets/89a08ec5-b260-4c91-81a8-a783a4ad258e" />
+<img width="2200" height="1000" alt="latency_box_BM_BookDepth_TopN" src="https://github.com/user-attachments/assets/1872c7fd-21c6-4de0-ab3b-92be62dbcb22" />
 
 ---
 
