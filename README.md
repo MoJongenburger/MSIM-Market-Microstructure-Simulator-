@@ -47,7 +47,7 @@ This keeps the "exchange kernel" small and testable while allowing realistic ven
 
 p50 stays flat at ~47 ns whether the book has 100 or 10,000 resting orders, demonstrating that the FlatPriceMap and vector-queue design keeps all hot data in L1 cache regardless of book depth.
 
-<img width="2420" height="1100" alt="latency_benchmark" src="https://github.com/user-attachments/assets/0ccec0af-c51f-442a-864f-babff40d22c0" />
+<img width="2420" height="1100" alt="latency_benchmark" src="https://github.com/user-attachments/assets/389b9850-8c65-4fb7-a52e-174956b3cad1" />
 
 ---
 
@@ -55,7 +55,7 @@ p50 stays flat at ~47 ns whether the book has 100 or 10,000 resting orders, demo
 
 Box-and-whisker distribution of `BM_ProcessMarketOrder` across all repetitions at N=10,000 resting orders. The tight interquartile range confirms low variance in the critical execution path.
 
-<img width="2200" height="1000" alt="latency_box_BM_ProcessMarketOrder" src="https://github.com/user-attachments/assets/223cdfe6-d6a3-40ec-bea1-af91342110d7" />
+<img width="1760" height="1100" alt="latency_box_BM_ProcessMarketOrder" src="https://github.com/user-attachments/assets/8736536c-0226-4664-b30c-61a76bbdadf4" />
 
 ---
 
