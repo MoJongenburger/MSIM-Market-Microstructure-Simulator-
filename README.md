@@ -10,6 +10,23 @@
 ![Stylised Facts](https://img.shields.io/badge/Stylised%20Facts-4%2F5%20confirmed%2C%201%20emergent-blue)
 ![License](https://img.shields.io/github/license/MoJongenburger/MSIM-Market-Microstructure-Simulator-)
 
+## Table of Contents
+
+- [Performance](#performance)
+- [Empirical Validation](#empirical-validation--stylised-facts)
+- [Optimization Journey](#optimization-journey)
+- [Python Quick Start](#python-quick-start)
+- [Build & Install](#build--install)
+- [Agents](#agents)
+- [Run Modes](#run-modes)
+- [Project Structure](#project-structure)
+- [Engineering Notes](#engineering-notes)
+- [Roadmap](#roadmap)
+- [Citing MSIM](#citing-msim)
+- [Known Limitations](#known-limitations)
+
+---
+
 MSIM is a deterministic, event-driven **limit order book + matching engine** written in modern **C++20**, built as a **microstructure research sandbox** for studying execution mechanics, venue rules, and agent interaction. It ships with a full **Python strategy interface** via pybind11, enabling researchers to write strategies in Python against the same sub-50 ns C++ engine (p50 = 46.6 ns, p99 = 47.1 ns on a commodity workstation).
 
 The project prioritises **reproducibility, correctness, and extensibility**. Its architecture separates:
@@ -25,7 +42,7 @@ This keeps the "exchange kernel" small and testable while allowing realistic ven
 
 ## Performance
 
-### Benchmark summary (Windows, MSVC 19.44, Release, 12-core/24-thread @ 2112 MHz)
+### Benchmark summary (Windows, MSVC 19.44, Release, Intel Core i7-13700F @ 2100 MHz)
 
 | Benchmark | p50 (ns) | p90 (ns) | p99 (ns) | What it measures |
 |---|---:|---:|---:|---|
@@ -45,7 +62,7 @@ This keeps the "exchange kernel" small and testable while allowing realistic ven
 
 ### Hot-path stability — ProcessMarketOrder across book sizes
 
-p50 stays flat at ~47 ns whether the book has 100 or 10,000 resting orders, demonstrating that the FlatPriceMap and vector-queue design keeps all hot data in L1 cache regardless of book depth.
+p50 stays flat at 46.6–46.8 ns whether the book has 100 or 10,000 resting orders (<0.5% variation), demonstrating that the FlatPriceMap and vector-queue design keeps all hot data in L1 cache regardless of book depth.
 
 <img width="2420" height="1100" alt="latency_benchmark" src="https://github.com/user-attachments/assets/389b9850-8c65-4fb7-a52e-174956b3cad1" />
 
@@ -71,7 +88,7 @@ Box-and-whisker distribution of `BM_ProcessMarketOrder` across all repetitions a
 
 `BM_BookDepth_TopN` across varying N. The `live_count` field in each price level makes order counting O(1) per level, keeping depth queries under 100 ns p99 regardless of how many orders have been cancelled at each level.
 
-<img width="2200" height="1000" alt="latency_box_BM_BookDepth_TopN" src="https://github.com/user-attachments/assets/1872c7fd-21c6-4de0-ab3b-92be62dbcb22" />
+<img width="2200" height="1000" alt="latency_box_BM_BookDepth_TopN" src="https://github.com/user-attachments/assets/1872c7fd-abe3-4fb8-87b5-7fc39f6f1543" />
 
 ---
 
@@ -294,8 +311,8 @@ The C++ engine is the performance foundation; Python is the research interface. 
 
 | Agent | Config | Description |
 |---|---|---|
-| `NoiseTrader` | — | Random market/limit order flow |
-| `MarketMaker` | — | Quotes around mid with inventory skew |
+| `NoiseTrader` | — | Simplified baseline agent; for research use prefer `HawkesNoiseTrader` |
+| `MarketMaker` | — | Simplified baseline agent; for research use prefer `MarketMakerAS` |
 | `FundamentalValueAgent` | `FundamentalValueConfig` | Glosten-Milgrom informed trader with OU private signal |
 | `MomentumAgent` | `MomentumConfig` | MACD trend-follower with position limits |
 | `HawkesNoiseTrader` | `HawkesNoiseConfig` | Self-exciting noise trader (Hawkes process arrivals) |
@@ -309,7 +326,7 @@ The C++ engine is the performance foundation; Python is the research interface. 
 Replaces flat Poisson arrivals with a self-exciting process:
 
 ```
-λ(t) = μ + ψ(t),   ψ_{t+1} = ψ_t · exp(−β·dt) + α·N_t
+λ(t) = μ + ψ(t),   ψ_{t+1} = ψ_t · exp(−β·Δt) + α·𝟙[event at step t]
 ```
 
 Order side is biased by LOB imbalance (Cont, Kukanov & Stoikov 2014), so noise traders partially follow short-term book pressure.
@@ -468,7 +485,7 @@ Also computes Amihud illiquidity, effective/realized spread decomposition, and p
 === MSIM Stylized Facts Report ===
 
 Return Distribution (n=773):
-  Std dev:         0.000995
+  Std dev:         0.000811
   Excess kurtosis: 4.04  [OK — fat tails]
 
 Autocorrelation (max_lag=20):
@@ -478,10 +495,10 @@ Autocorrelation (max_lag=20):
 
 Spread:
   Time-weighted spread:  8.86 ticks  [OK]
-  Effective spread:      8.42 ticks
+  Effective spread:      9.89 ticks
 
 Validation: Fat tails PASS | Vol clustering PASS | Flow autocorr PASS |
-            Positive spread PASS | Price impact INCONCLUSIVE (R²≈0.001)
+            Positive spread PASS | Price impact INCONCLUSIVE (R²≈0.0005)
 ```
 
 ---
@@ -552,6 +569,8 @@ result.summary()
 ```
 
 ### 3) Live exchange gateway (local web UI)
+
+> **Experimental** — provides a basic order submission interface for manual testing.
 
 ```bash
 ./build/msim_gateway
@@ -638,7 +657,7 @@ web/                              # Browser UI served by gateway
 ### v1.2.2 — PnL conservation verified + paper sync
 
 - **Wealth conservation confirmed.** A full PnL audit (`src/python/pnl_conservation_check.py`) confirms the simulation is exactly zero-sum: total mark-to-market PnL, total cash PnL, and net position all sum to zero across all nine agents at every horizon. The system conserves wealth exactly.
-- **Paper synchronisation.** All benchmark and validation numbers in `paper/msim_paper.tex` updated to match `paper/data/` raw outputs. Agent TCA table updated with current v1.2.1 values (all 9 agents, correct orders/fills/slippage/PnL). Kyle λ updated (−5.79, R²=0.0005). Spread decomposition updated (effective 9.89, realized +36.38, adverse −26.51 ticks). New subsection on emergent vs. idiosyncratic agent outcomes added.
+- **Paper synchronisation.** All benchmark and validation numbers in `paper/msim_paper.tex` updated to match `paper/data/` raw outputs. Agent TCA table updated with values regenerated from the v1.2.1 codebase (all 9 agents, correct orders/fills/slippage/PnL). Kyle λ updated (−5.79, R²=0.0005). Spread decomposition updated (effective 9.89, realized +36.38, adverse −26.51 ticks). New subsection on emergent vs. idiosyncratic agent outcomes added.
 - **README sync.** Volatility clustering corrected to 46/48 (96%), spread median to 8.37 ticks, sweep caption to 26.3 ns.
 
 ### v1.2.1 — Bug fixes
@@ -651,7 +670,29 @@ web/                              # Browser UI served by gateway
 
 ## Roadmap
 
-1. ~~**Multi-seed scenario validation**~~ ✅ **DONE** — `src/python/multiseed_study.py` runs 50 subprocess-isolated seeds. Pass rates: fat tails 96% (46/48), vol clustering 96% (46/48), flow AC 100% (50/50), positive spread 98% (49/50). PnL conservation verified: total system PnL = 0 exactly.
+1. ~~**Multi-seed scenario validation (50 seeds)**~~ ✅ **DONE** — `src/python/multiseed_study.py` runs 50 subprocess-isolated seeds. Pass rates: fat tails 96% (46/48), vol clustering 96% (46/48), flow AC 100% (50/50), positive spread 98% (49/50). PnL conservation verified: total system PnL = 0 exactly. Future: scale to 500+ seeds with formal LOBster calibration. Future: scale to 500+ seeds with formal LOBster calibration.
+
+
+---
+
+## Citing MSIM
+
+If you use MSIM in your research, please cite:
+
+```bibtex
+@article{jongenburger2026msim,
+  title  = {MSIM: A Sub-50 Nanosecond Deterministic Market Microstructure Simulator in C++20},
+  author = {Jongenburger, Mo},
+  year   = {2026},
+  note   = {Available at https://github.com/MoJongenburger/MSIM-Market-Microstructure-Simulator-}
+}
+```
+
+---
+
+## Known Limitations
+
+Single asset, single venue, single-threaded (by design for determinism). Price impact estimation (Kyle λ) requires larger sample sizes than the default 300s horizon (R²≈0.0005 at n=773). Agent outcomes are highly path-dependent; the 50-seed robustness study characterises the distribution. See Section 9.2 of the accompanying paper for the full limitations discussion.
 
 2. **Unit tests for agent and TCA layer** — structured tests for `HawkesNoiseTrader`, `MarketMakerAS`, `VWAPAgent`, `ISAgent`, and the TCA computation pipeline.
 
