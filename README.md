@@ -87,9 +87,9 @@ A 300-second simulation with 9 agents (5 Hawkes noise traders, Avellaneda-Stoiko
 | Trade-sign AC lag-1 | 0.270 (median 0.327) | 0.30–0.70 | Bouchaud et al. (2004) | ✅ Flow AC — 50/50 seeds (100%) |
 | Time-weighted spread | 8.86 ticks (median 8.37) | positive | Glosten-Milgrom (1985) | ✅ Positive spread — 49/50 seeds (98%) |
 
-> **Note on price impact:** Kyle's λ is nonzero but R²≈0.001 at n~800. The A-S market maker continuously re-prices quotes, attenuating the post-trade price drift that Kyle's λ captures — consistent with optimal market-maker behaviour. The near-zero R² is consistent across all 50 seeds (mean R²=0.003).
-The spread decomposition holds mathematically:
-The spread decomposition identity (effective = realized + adverse selection) holds, validating the Huang-Stoll estimator. The negative realized spread reflects that fundamental value agents generate sufficient informed flow to dominate the market maker's spread capture — consistent with the Grossman-Stiglitz (1980) equilibrium under high adverse selection.
+> **Note on price impact:** Kyle's λ is nonzero but R²≈0.0005 at n~800. The A-S market maker continuously re-prices quotes after each fill, causing mean reversion rather than sustained post-trade drift — this attenuates the signal that Kyle's λ captures. The near-zero R² is consistent across all 50 seeds (mean R²=0.003).
+>
+> **Spread decomposition:** The identity effective = realized + adverse selection holds (9.89 ≈ 36.38 + (−26.51) ticks), validating the Huang-Stoll estimator. The negative adverse selection component indicates that prices mean-revert after each fill — a testable prediction of the A-S model's continuous quote re-pricing.
 
 ### Multi-Seed Robustness
 
@@ -104,6 +104,12 @@ A 50-seed robustness study (`src/python/multiseed_study.py`) confirms these resu
 | Return AC negative | **47/48 (98%)** | −0.317 |
 
 Kurtosis median of 7.04 falls within the [3,10] range of Cont (2001). Seeds with kurtosis > 10 exhibit genuine fat-tail behaviour from occasional informed-flow sweeps, consistent with real transaction-level LOB data.
+
+---
+
+### Key Finding: Emergent vs. Idiosyncratic
+
+A structural property of the simulation is that **aggregate market statistics are robust while individual agent outcomes are highly path-dependent**. Across code versions that produce entirely different stochastic trajectories for seed=42, the four stylised facts (kurtosis, volatility clustering, flow AC, spread) remain identical to three significant figures, while individual agent PnL values change by hundreds of thousands of ticks including sign reversals. This mirrors real markets: market-level regularities coexist with enormous idiosyncratic variance in individual trader performance. The market maker's PnL (~+10k ticks) is structurally robust across paths, consistent with the A-S inventory management framework.
 
 ---
 
@@ -632,7 +638,7 @@ web/                              # Browser UI served by gateway
 ### v1.2.2 — PnL conservation verified + paper sync
 
 - **Wealth conservation confirmed.** A full PnL audit (`src/python/pnl_conservation_check.py`) confirms the simulation is exactly zero-sum: total mark-to-market PnL, total cash PnL, and net position all sum to zero across all nine agents at every horizon. The system conserves wealth exactly.
-- **Paper synchronisation.** All benchmark and validation numbers in `paper/msim_paper.tex` updated to match `paper/data/` raw outputs. Appendix sweep table rebuilt from `benchmark_results.json`. Agent TCA table updated to current code output.
+- **Paper synchronisation.** All benchmark and validation numbers in `paper/msim_paper.tex` updated to match `paper/data/` raw outputs. Agent TCA table updated with current v1.2.1 values (all 9 agents, correct orders/fills/slippage/PnL). Kyle λ updated (−5.79, R²=0.0005). Spread decomposition updated (effective 9.89, realized +36.38, adverse −26.51 ticks). New subsection on emergent vs. idiosyncratic agent outcomes added.
 - **README sync.** Volatility clustering corrected to 46/48 (96%), spread median to 8.37 ticks, sweep caption to 26.3 ns.
 
 ### v1.2.1 — Bug fixes
