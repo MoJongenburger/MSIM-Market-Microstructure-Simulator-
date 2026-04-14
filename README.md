@@ -88,7 +88,7 @@ Box-and-whisker distribution of `BM_ProcessMarketOrder` across all repetitions a
 
 `BM_BookDepth_TopN` across varying N. The `live_count` field in each price level makes order counting O(1) per level, keeping depth queries under 100 ns p99 regardless of how many orders have been cancelled at each level.
 
-<img width="2200" height="1000" alt="latency_box_BM_BookDepth_TopN" src="https://github.com/user-attachments/assets/1872c7fd-abe3-4fb8-87b5-7fc39f6f1543" />
+<img width="2200" height="1000" alt="latency_box_BM_BookDepth_TopN" src="https://github.com/user-attachments/assets/045dfb78-9499-44b5-be9e-731ffdfe2abb" />
 
 ---
 
