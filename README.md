@@ -58,7 +58,7 @@ This keeps the "exchange kernel" small and testable while allowing realistic ven
 
 **Throughput:** 21.9 M market orders/sec at p50 · 21.5 M/sec at p99 (single-threaded, warm book).
 
-> **Note on benchmark methodology:** These figures were measured without core pinning (OS-scheduled, turbo boost active), reflecting realistic sustained clock speeds. A supplementary pinned run (P-core affinity) produced latencies 10–35% higher. Both datasets are archived in `paper/data/`.
+> **Note on benchmark methodology:** These figures were measured without core pinning (OS-scheduled, turbo boost active), reflecting realistic sustained clock speeds. A supplementary pinned run (P-core affinity) produced latencies 10–35% higher.
 
 ---
 
