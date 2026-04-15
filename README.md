@@ -58,6 +58,8 @@ This keeps the "exchange kernel" small and testable while allowing realistic ven
 
 **Throughput:** 21.9 M market orders/sec at p50 · 21.5 M/sec at p99 (single-threaded, warm book).
 
+> **Note on benchmark methodology:** These figures were measured without core pinning (OS-scheduled, turbo boost active), reflecting realistic sustained clock speeds. A supplementary pinned run (P-core affinity) produced latencies 10–35% higher. Both datasets are archived in `paper/data/`.
+
 ---
 
 ### Hot-path stability — ProcessMarketOrder across book sizes
@@ -140,7 +142,7 @@ The engine has been systematically optimised through eight targeted passes. Each
 | 2 | `FlatPriceMap` (sorted vector replaces `std::map`) | Eliminates red-black tree pointer-chasing |
 | 3 | `FlatPriceMap::front_offset_` (O(1) level erase) | SweepKLevels 103 → 28 ns **(3.7×)** |
 | 4 | `live_count` field in `Level` (O(1) depth query) | BookDepth 2107 → 84 ns **(25.1×)** on Windows |
-| 5 | `SmallVector<Trade, 4>` for `MatchResult::trades` | Heap allocation eliminated for >95% of orders |
+| 5 | `SmallVector<Trade, 4>` for `MatchResult::trades` | Heap allocation eliminated for 99.93% of orders |
 | 6 | `next_event_ts_` cache in matching engine | ~2000 redundant `flush()` calls/sec eliminated |
 | 7 | Robin Hood `FlatHashMap` for `OrderBook::loc_` | BookCancel 900 → 128 ns **(7.0×)** |
 | 8 | Run-loop bb/ba reuse, insertion sort, `sfm.reserve` | 2–4 redundant book queries/step eliminated |
@@ -313,7 +315,7 @@ The C++ engine is the performance foundation; Python is the research interface. 
 |---|---|---|
 | `NoiseTrader` | — | Simplified baseline agent; for research use prefer `HawkesNoiseTrader` |
 | `MarketMaker` | — | Simplified baseline agent; for research use prefer `MarketMakerAS` |
-| `FundamentalValueAgent` | `FundamentalValueConfig` | Glosten-Milgrom informed trader with OU private signal |
+| `FundamentalValueAgent` | `FundamentalValueConfig` | Mean-reversion informed value agent (inspired by Glosten-Milgrom); OU process anchors to endogenous mid-price |
 | `MomentumAgent` | `MomentumConfig` | MACD trend-follower with position limits |
 | `HawkesNoiseTrader` | `HawkesNoiseConfig` | Self-exciting noise trader (Hawkes process arrivals) |
 | `MarketMakerAS` | `MarketMakerASConfig` | Avellaneda-Stoikov optimal quoting with imbalance skew |
@@ -623,7 +625,7 @@ include/msim/
   agents/
     noise_trader.hpp
     market_maker.hpp
-    fundamental_value_agent.hpp   # Glosten-Milgrom informed trader
+    fundamental_value_agent.hpp   # Mean-reversion informed value agent
     momentum_agent.hpp            # MACD trend-follower
     noise_trader_hawkes.hpp       # Hawkes self-exciting noise trader
     market_maker_as.hpp           # Avellaneda-Stoikov optimal MM
@@ -656,9 +658,9 @@ web/                              # Browser UI served by gateway
 
 ### v1.2.2 — PnL conservation verified + paper sync
 
-- **Wealth conservation confirmed.** A full PnL audit (`src/python/pnl_conservation_check.py`) confirms the simulation is exactly zero-sum: total mark-to-market PnL, total cash PnL, and net position all sum to zero across all nine agents at every horizon. The system conserves wealth exactly.
-- **Paper synchronisation.** All benchmark and validation numbers in `paper/msim_paper.tex` updated to match `paper/data/` raw outputs. Agent TCA table updated with values regenerated from the v1.2.1 codebase (all 9 agents, correct orders/fills/slippage/PnL). Kyle λ updated (−5.79, R²=0.0005). Spread decomposition updated (effective 9.89, realized +36.38, adverse −26.51 ticks). New subsection on emergent vs. idiosyncratic agent outcomes added.
-- **README sync.** Volatility clustering corrected to 46/48 (96%), spread median to 8.37 ticks, sweep caption to 26.3 ns.
+- **Wealth conservation confirmed.** A full PnL audit (`src/python/pnl_conservation_check.py`) confirms the simulation is exactly zero-sum: total mark-to-market PnL, total cash PnL, and net position all sum to zero across all nine agents at every horizon.
+- **Paper synchronisation.** Agent TCA table updated with values regenerated from the v1.2.1 codebase. Kyle λ updated (−5.79, R²=0.0005). Spread decomposition updated (effective 9.89, realized +36.38, adverse −26.51 ticks). New subsection on emergent vs. idiosyncratic agent outcomes added. Pinned benchmark data archived.
+- **README sync.** All values updated to match current codebase output.
 
 ### v1.2.1 — Bug fixes
 
@@ -670,8 +672,15 @@ web/                              # Browser UI served by gateway
 
 ## Roadmap
 
-1. ~~**Multi-seed scenario validation (50 seeds)**~~ ✅ **DONE** — `src/python/multiseed_study.py` runs 50 subprocess-isolated seeds. Pass rates: fat tails 96% (46/48), vol clustering 96% (46/48), flow AC 100% (50/50), positive spread 98% (49/50). PnL conservation verified: total system PnL = 0 exactly. Future: scale to 500+ seeds with formal LOBster calibration. Future: scale to 500+ seeds with formal LOBster calibration.
+1. ~~**Multi-seed scenario validation (50 seeds)**~~ ✅ **DONE** — `src/python/multiseed_study.py` runs 50 subprocess-isolated seeds. Pass rates: fat tails 96% (46/48), vol clustering 96% (46/48), flow AC 100% (50/50), positive spread 98% (49/50). PnL conservation verified: total system PnL = 0 exactly. Future: scale to 500+ seeds with formal LOBster calibration.
 
+2. **Unit tests for agent and TCA layer** — structured tests for `HawkesNoiseTrader`, `MarketMakerAS`, `VWAPAgent`, `ISAgent`, and the TCA computation pipeline.
+
+3. **Gymnasium wrapper for RL research** — wrap `World` as a `gym.Env` so RL agents (PPO, SAC) can train against MSIM. Deterministic seeding makes runs directly comparable.
+
+4. **Fuzz testing the matching engine** — LibFuzzer target covering auction uncrossing, FOK atomicity, and circuit breaker transition edge cases.
+
+5. **numpy structured array output** — expose `trades`, `tops`, and `fills` as zero-copy numpy arrays for faster downstream pandas construction in large-scale sweeps.
 
 ---
 
@@ -693,11 +702,3 @@ If you use MSIM in your research, please cite:
 ## Known Limitations
 
 Single asset, single venue, single-threaded (by design for determinism). Price impact estimation (Kyle λ) requires larger sample sizes than the default 300s horizon (R²≈0.0005 at n=773). Agent outcomes are highly path-dependent; the 50-seed robustness study characterises the distribution. See Section 9.2 of the accompanying paper for the full limitations discussion.
-
-2. **Unit tests for agent and TCA layer** — structured tests for `HawkesNoiseTrader`, `MarketMakerAS`, `VWAPAgent`, `ISAgent`, and the TCA computation pipeline.
-
-3. **Gymnasium wrapper for RL research** — wrap `World` as a `gym.Env` so RL agents (PPO, SAC) can train against MSIM. Deterministic seeding makes runs directly comparable.
-
-4. **Fuzz testing the matching engine** — LibFuzzer target covering auction uncrossing, FOK atomicity, and circuit breaker transition edge cases.
-
-5. **numpy structured array output** — expose `trades`, `tops`, and `fills` as zero-copy numpy arrays for faster downstream pandas construction in large-scale sweeps.
