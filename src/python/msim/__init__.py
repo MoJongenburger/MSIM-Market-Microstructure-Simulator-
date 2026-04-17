@@ -56,7 +56,7 @@ Scenario runner
 >>> def factory(params):
 ...     w = msim.make_world(mid=10_000)
 ...     cfg = msim.HawkesNoiseConfig()
-...     cfg.p_market = params["p_market"]
+...     param_grid = {"p_market": [0.3, 0.5, 0.7]},
 ...     w.add_agent(msim.agents.HawkesNoiseTrader(owner_id=1, config=cfg))
 ...     w.add_agent(msim.agents.MarketMakerAS(owner_id=10))
 ...     return w
