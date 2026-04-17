@@ -4,11 +4,8 @@
     "author": "Mo Jongenburger",
     "year": 2026,
     "repo_tag": "v2.1.1",
+    "commit_sha": "da38eaac7712f2ba352f34a37820324be7b8cc2e"
   },
-  "commit": {
-    "tag": "v2.1.1",
-    "sha": "da38eaac7712f2ba352f34a37820324be7b8cc2e"
-},
   "build_environment": {
     "primary_os": "Windows 11",
     "compiler_windows": "MSVC 19.44",
@@ -27,21 +24,25 @@
       "output_file": "paper/data/benchmark_results.json"
     },
     "pinned": {
-      "description": "Pinned to P-core 0 (ProcessorAffinity=1), no turbo — conservative baseline",
+      "description": "Pinned to P-core 0 (ProcessorAffinity=1), no turbo — conservative baseline. Latencies 10-35% higher.",
       "command": "PowerShell: $proc = Start-Process -FilePath 'build\\msim_bench.exe' -ArgumentList '--benchmark_min_time=0.5 --benchmark_repetitions=50 --benchmark_format=json --benchmark_out=paper\\data\\benchmark_results_pinned.json' -PassThru -NoNewWindow; $proc.ProcessorAffinity = 1; $proc.WaitForExit()",
-      "output_file": "paper/data/benchmark_results_pinned.json",
-      "note": "Pinned latencies are 10-35% higher than unpinned — confirms turbo boost contribution"
+      "output_file": "paper/data/benchmark_results_pinned.json"
     }
   },
   "validation": {
-    "seed42_command": "python src\\python\\run_one_seed.py",
-    "seed42_output": "paper/data/bootstrap_results.json",
+    "note": "PYTHONPATH must be set to src/python before running any of the following.",
+    "seed42_step1_command": "python src\\python\\run_one_seed.py",
+    "seed42_step1_output": "prints seed-42 stylised-fact metrics to stdout",
+    "seed42_step2_command": "python src\\python\\bootstrap_ci.py",
+    "seed42_step2_output": "paper/data/bootstrap_results.json",
     "multiseed_command": "python src\\python\\multiseed_study.py",
     "multiseed_output_csv": "paper/data/multiseed_results.csv",
     "multiseed_output_json": "paper/data/multiseed_summary.json",
-    "bootstrap_command": "python src\\python\\bootstrap_ci.py",
     "pnl_audit_command": "python src\\python\\pnl_conservation_check.py",
-    "spread_sensitivity_command": "python src\\python\\measure_3e_spread_sensitivity.py",
+    "spread_sensitivity": {
+      "command": "python src\\python\\measure_3e_spread_sensitivity.py",
+      "note": "Requires MSIM_BUILD_PYTHON=ON and PYTHONPATH=src/python. Output is printed to stdout; values were manually transcribed into the paper's spread sensitivity table."
+    },
     "n_seeds": 50,
     "excluded_seeds": [1029, 1048],
     "exclusion_reason": {
@@ -80,12 +81,42 @@
       "identity_check": "9.89 = 36.38 + (-26.51)"
     }
   },
-  "agent_experiment_parameters": {
-    "note": "Calibrated for the 50-seed validation experiment; not necessarily code-level defaults",
-    "HawkesNoise": {"p_market": 0.40, "imbalance_bias": 0.3, "lot_size": 1},
-    "MarketMakerAS": {"gamma": 0.01, "sigma_init": 2.0, "sigma_ewma": 0.02, "alpha_imb": 0.5},
-    "FundamentalValue": {"kappa": 0.005, "sigma_v": 1.5, "threshold": 1.0, "lot_size": 5},
-    "Momentum": {"entry_band": 0.30, "exit_band": 0.05, "lot_size": 3, "max_position": 15},
-    "IS_AlmgrenChriss": {"sigma": 2.0, "eta": 0.5, "risk_aversion": 0.25}
+  "validation_agent_configuration": {
+    "note": "Values marked 'script' are explicit overrides in the validation scripts. Values marked 'default' are inherited from the C++ header defaults.",
+    "HawkesNoise_x5": {
+      "p_market": {"value": 0.5, "source": "script"},
+      "lot_size": {"value": 2, "source": "script"},
+      "imbalance_bias": {"value": 0.3, "source": "default"},
+      "min_offset": {"value": 1, "source": "default"},
+      "max_offset": {"value": 5, "source": "default"}
+    },
+    "MarketMakerAS_x1": {
+      "gamma": {"value": 0.01, "source": "default"},
+      "kappa": {"value": 1.5, "source": "default"},
+      "sigma_init": {"value": 2.0, "source": "default"},
+      "sigma_ewma": {"value": 0.02, "source": "default"},
+      "alpha_imb": {"value": 0.5, "source": "default"},
+      "min_half_spread_ticks": {"value": 1, "source": "default"}
+    },
+    "FundamentalValue_A_x1_aggressive": {
+      "kappa": {"value": 0.005, "source": "default"},
+      "sigma_v": {"value": 0.3, "source": "script"},
+      "threshold": {"value": 1.0, "source": "script"},
+      "lot_size": {"value": 2, "source": "script"}
+    },
+    "FundamentalValue_B_x1_conservative": {
+      "kappa": {"value": 0.005, "source": "default"},
+      "sigma_v": {"value": 0.2, "source": "script"},
+      "threshold": {"value": 3.0, "source": "script"},
+      "lot_size": {"value": 1, "source": "script"}
+    },
+    "Momentum_x1": {
+      "alpha_fast": {"value": "2/6 ≈ 0.333", "source": "default"},
+      "alpha_slow": {"value": "2/21 ≈ 0.095", "source": "default"},
+      "entry_band": {"value": 2.0, "source": "script"},
+      "exit_band": {"value": 0.05, "source": "default"},
+      "lot_size": {"value": 1, "source": "script"},
+      "max_position": {"value": 15, "source": "default"}
+    }
   }
 }
