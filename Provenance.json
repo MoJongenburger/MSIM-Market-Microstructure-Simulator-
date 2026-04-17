@@ -4,7 +4,6 @@
     "author": "Mo Jongenburger",
     "year": 2026,
     "repo_tag": "v2.1.1",
-    "note": "Fill in commit_sha below with: git rev-parse v2.1.1"
   },
   "commit": {
     "tag": "v2.1.1",
