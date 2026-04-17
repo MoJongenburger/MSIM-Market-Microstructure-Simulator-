@@ -1,0 +1,92 @@
+{
+  "paper": {
+    "title": "MSIM: A Sub-50 Nanosecond Deterministic Market Microstructure Simulator in C++20",
+    "author": "Mo Jongenburger",
+    "year": 2026,
+    "repo_tag": "v2.1.1",
+    "note": "Fill in commit_sha below with: git rev-parse v2.1.1"
+  },
+  "commit": {
+    "tag": "v2.1.1",
+    "sha": "FILL_IN: run  git rev-parse v2.1.1  and paste result here"
+  },
+  "build_environment": {
+    "primary_os": "Windows 11",
+    "compiler_windows": "MSVC 19.44",
+    "compiler_linux": "GCC 12 (Ubuntu 22.04)",
+    "compiler_macos": "Clang 14 (macOS 14)",
+    "cmake_version_minimum": "3.20",
+    "cmake_flags": "-DCMAKE_BUILD_TYPE=Release -DMSIM_BUILD_PYTHON=ON",
+    "python_version": "3.11",
+    "python_dependencies": ["numpy", "pandas", "scipy"],
+    "hardware": "Intel Core i7-13700F, 8P+8E cores (24 threads), base 2100 MHz"
+  },
+  "benchmarks": {
+    "unpinned": {
+      "description": "OS-scheduled, turbo boost active — realistic sustained clock speed",
+      "command": "build\\msim_bench.exe --benchmark_min_time=0.3 --benchmark_format=json --benchmark_out=paper\\data\\benchmark_results.json",
+      "output_file": "paper/data/benchmark_results.json"
+    },
+    "pinned": {
+      "description": "Pinned to P-core 0 (ProcessorAffinity=1), no turbo — conservative baseline",
+      "command": "PowerShell: $proc = Start-Process -FilePath 'build\\msim_bench.exe' -ArgumentList '--benchmark_min_time=0.5 --benchmark_repetitions=50 --benchmark_format=json --benchmark_out=paper\\data\\benchmark_results_pinned.json' -PassThru -NoNewWindow; $proc.ProcessorAffinity = 1; $proc.WaitForExit()",
+      "output_file": "paper/data/benchmark_results_pinned.json",
+      "note": "Pinned latencies are 10-35% higher than unpinned — confirms turbo boost contribution"
+    }
+  },
+  "validation": {
+    "seed42_command": "python src\\python\\run_one_seed.py",
+    "seed42_output": "paper/data/bootstrap_results.json",
+    "multiseed_command": "python src\\python\\multiseed_study.py",
+    "multiseed_output_csv": "paper/data/multiseed_results.csv",
+    "multiseed_output_json": "paper/data/multiseed_summary.json",
+    "bootstrap_command": "python src\\python\\bootstrap_ci.py",
+    "pnl_audit_command": "python src\\python\\pnl_conservation_check.py",
+    "spread_sensitivity_command": "python src\\python\\measure_3e_spread_sensitivity.py",
+    "n_seeds": 50,
+    "excluded_seeds": [1029, 1048],
+    "exclusion_reason": {
+      "1029": "Degenerate draw: 561 trades, extreme kurtosis, 787-tick price drift",
+      "1048": "Complete price explosion: mid-price collapsed from 10000 to -4877547 ticks, market maker position -4694 lots across 115737 orders"
+    }
+  },
+  "key_results": {
+    "BM_ProcessMarketOrder_p50_ns": 46.6,
+    "BM_ProcessMarketOrder_p99_ns": 47.1,
+    "BM_ProcessMarketOrder_stability": "<0.5% variation across N=100 to N=10000 resting orders",
+    "throughput_ops_per_sec": 21900000,
+    "stylised_facts_seed42": {
+      "n_trades": 773,
+      "excess_kurtosis": 4.045,
+      "return_ac_lag1": -0.451,
+      "abs_return_ac_lag1": 0.323,
+      "trade_sign_ac_lag1": 0.270,
+      "time_weighted_spread_ticks": 8.861,
+      "kyle_lambda_r2": 0.00054,
+      "kyle_lambda": -5.79
+    },
+    "multiseed_pass_rates_48_eligible_seeds": {
+      "fat_tails_kurtosis_gt3": "46/48 (96%)",
+      "vol_clustering": "46/48 (96%)",
+      "flow_autocorrelation": "50/50 (100%)",
+      "positive_spread": "49/50 (98%)",
+      "return_ac_negative": "47/48 (98%)",
+      "kurtosis_median": 7.04
+    },
+    "pnl_conservation": "Total MtM PnL = 0 exactly across all 9 agents at all horizons",
+    "spread_decomposition": {
+      "effective_ticks": 9.89,
+      "realized_ticks": 36.38,
+      "adverse_selection_ticks": -26.51,
+      "identity_check": "9.89 = 36.38 + (-26.51)"
+    }
+  },
+  "agent_experiment_parameters": {
+    "note": "Calibrated for the 50-seed validation experiment; not necessarily code-level defaults",
+    "HawkesNoise": {"p_market": 0.40, "imbalance_bias": 0.3, "lot_size": 1},
+    "MarketMakerAS": {"gamma": 0.01, "sigma_init": 2.0, "sigma_ewma": 0.02, "alpha_imb": 0.5},
+    "FundamentalValue": {"kappa": 0.005, "sigma_v": 1.5, "threshold": 1.0, "lot_size": 5},
+    "Momentum": {"entry_band": 0.30, "exit_band": 0.05, "lot_size": 3, "max_position": 15},
+    "IS_AlmgrenChriss": {"sigma": 2.0, "eta": 0.5, "risk_aversion": 0.25}
+  }
+}
