@@ -2,22 +2,31 @@
 // ============================================================
 // include/msim/agents/fundamental_value_agent.hpp
 //
-// Glosten-Milgrom informed trader.
-// Private signal follows discrete Ornstein-Uhlenbeck process:
+// Private-signal mean-reversion agent (inspired by Glosten-Milgrom).
 //
-//   V_{t+1} = V_t + κ(μ − V_t) + σ_v · Z,   Z ~ N(0,1)
+// The agent holds a latent fundamental value V_t, known only to itself,
+// which follows a discrete Ornstein-Uhlenbeck process anchored to mu:
 //
-// Buys  when V_t − ask > threshold  (asset underpriced).
-// Sells when bid − V_t > threshold  (asset overpriced).
-// Submits IOC market orders — no resting quotes.
+//   V_{t+1} = V_t + kappa * (mu - V_t) + sigma_v * Z,   Z ~ N(0,1)
+//
+// mu is a FIXED scalar initialised once from the first observed mid-price
+// at simulation start and does not change during the run.  The agent
+// therefore mean-reverts to the initial market mid-price level, not to
+// the current mid at each step.
+//
+// Trading rule (IOC market orders, no resting quotes):
+//   Buy  when  V_t - ask > threshold   (asset underpriced vs. private signal)
+//   Sell when  bid - V_t > threshold   (asset overpriced  vs. private signal)
+//
+// This produces directional pressure and endogenous price discovery but
+// does not implement the full Glosten-Milgrom informed-trader equilibrium
+// (which requires an exogenous value process and a learning market maker).
 //
 // Implements msim::IAgent exactly.
 // ============================================================
-
 #include <cmath>
 #include <random>
 #include <vector>
-
 #include "msim/world.hpp"   // IAgent, MarketView, AgentState, Action
 #include "msim/order.hpp"   // Order, TimeInForce, MarketStyle
 #include "msim/types.hpp"   // Price, Qty, Ts, Side, OrderType, OwnerId
@@ -26,10 +35,12 @@ namespace msim::agents {
 
 struct FundamentalValueConfig {
   double kappa     = 0.005; // OU mean-reversion speed per step
-  double sigma_v   = 1.5;   // volatility of fundamental value (ticks/step)
+  double sigma_v   = 1.5;   // volatility of the value process (ticks/step)
   double threshold = 1.0;   // minimum mispricing (ticks) before trading
   Qty    lot_size  = 5;     // fixed order size in lots
-  // Long-run mean mu: if 0, initialised to first observed mid-price.
+  // mu (long-run anchor): if 0.0, initialised from first observed mid-price
+  // and then held fixed for the remainder of the simulation.
+  double mu        = 0.0;
 };
 
 class FundamentalValueAgent final : public IAgent {
@@ -43,7 +54,7 @@ public:
 
   void seed(uint64_t s) override {
     rng_.seed(s);
-    initialised_ = false;   // re-initialise V on first step after re-seed
+    initialised_ = false;   // re-initialise V and mu on first step after re-seed
   }
 
   void step(Ts ts,
@@ -53,16 +64,22 @@ public:
   {
     if (!view.best_bid || !view.best_ask) return;
 
-    // Initialise V to first observed mid-price
+    // One-time initialisation: set V and the fixed anchor mu from the
+    // first observed mid-price (or from cfg_.mu if pre-configured).
     if (!initialised_) {
+      double init_mid;
       if (view.mid)
-        V_ = mu_ = static_cast<double>(*view.mid);
+        init_mid = static_cast<double>(*view.mid);
       else
-        V_ = mu_ = static_cast<double>(*view.best_bid + *view.best_ask) / 2.0;
+        init_mid = static_cast<double>(*view.best_bid + *view.best_ask) / 2.0;
+
+      V_  = init_mid;
+      mu_ = (cfg_.mu != 0.0) ? cfg_.mu : init_mid;  // use cfg override if set
       initialised_ = true;
     }
 
-    // Step OU process: V_{t+1} = V_t + κ(μ − V_t) + σ_v · Z
+    // Step OU process around the fixed anchor mu:
+    //   V_{t+1} = V_t + kappa * (mu - V_t) + sigma_v * Z
     V_ += cfg_.kappa * (mu_ - V_) + cfg_.sigma_v * normal_(rng_);
 
     const double ask = static_cast<double>(*view.best_ask);
@@ -75,7 +92,8 @@ public:
   }
 
   // For optional FV signal logging in world.cpp
-  double fundamental_value() const noexcept { return V_; }
+  double fundamental_value()  const noexcept { return V_;  }
+  double fundamental_anchor() const noexcept { return mu_; }
 
 private:
   Order make_order(Ts ts, Side side) const {
@@ -98,8 +116,8 @@ private:
   std::mt19937_64                  rng_{};
   std::normal_distribution<double> normal_{0.0, 1.0};
   bool                             initialised_ = false;
-  double                           V_  = 0.0;
-  double                           mu_ = 0.0;
+  double                           V_  = 0.0;   // current private value estimate
+  double                           mu_ = 0.0;   // fixed anchor (set once at init)
   mutable uint64_t                 counter_ = 0;
 };
 
