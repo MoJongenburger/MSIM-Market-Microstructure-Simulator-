@@ -137,6 +137,8 @@ from ._msim_core import (
     __author__,
 )
 
+__version__ = "2.1.1"
+
 # ── Pure-Python submodules ────────────────────────────────────────────────────
 from . import analysis   # noqa: F401
 from . import execution  # noqa: F401
