@@ -58,7 +58,7 @@ This keeps the "exchange kernel" small and testable while allowing realistic ven
 
 **Throughput:** 21.9 M market orders/sec at p50 · 21.5 M/sec at p99 (single-threaded, warm book).
 
-> **Note on benchmark methodology:** These figures were measured without core pinning (OS-scheduled, turbo boost active), reflecting realistic sustained clock speeds. A supplementary pinned run (P-core affinity) produced latencies 10–35% higher.
+> **Note on benchmark methodology:** These figures were measured without core pinning (OS-scheduled, turbo boost active), reflecting realistic sustained clock speeds. A supplementary pinned run (P-core affinity) produced latencies 10–35% higher. Both datasets are archived in `paper/data/`.
 
 ---
 
@@ -315,7 +315,7 @@ The C++ engine is the performance foundation; Python is the research interface. 
 |---|---|---|
 | `NoiseTrader` | — | Simplified baseline agent; for research use prefer `HawkesNoiseTrader` |
 | `MarketMaker` | — | Simplified baseline agent; for research use prefer `MarketMakerAS` |
-| `FundamentalValueAgent` | `FundamentalValueConfig` | Mean-reversion informed value agent (inspired by Glosten-Milgrom); OU process anchors to endogenous mid-price |
+| `FundamentalValueAgent` | `FundamentalValueConfig` | Mean-reversion informed value agent (inspired by Glosten-Milgrom); OU process anchors to a fixed reference level initialised from the first observed mid-price |
 | `MomentumAgent` | `MomentumConfig` | MACD trend-follower with position limits |
 | `HawkesNoiseTrader` | `HawkesNoiseConfig` | Self-exciting noise trader (Hawkes process arrivals) |
 | `MarketMakerAS` | `MarketMakerASConfig` | Avellaneda-Stoikov optimal quoting with imbalance skew |
@@ -625,7 +625,7 @@ include/msim/
   agents/
     noise_trader.hpp
     market_maker.hpp
-    fundamental_value_agent.hpp   # Mean-reversion informed value agent
+    fundamental_value_agent.hpp   # Private-signal OU mean-reversion agent (fixed anchor)
     momentum_agent.hpp            # MACD trend-follower
     noise_trader_hawkes.hpp       # Hawkes self-exciting noise trader
     market_maker_as.hpp           # Avellaneda-Stoikov optimal MM
@@ -656,13 +656,13 @@ web/                              # Browser UI served by gateway
 
 ## Engineering Notes
 
-### v1.2.2 — PnL conservation verified + paper sync
+### v2.1.1 — Paper sync: rule engine accuracy, FV agent, parameter verification
 
 - **Wealth conservation confirmed.** A full PnL audit (`src/python/pnl_conservation_check.py`) confirms the simulation is exactly zero-sum: total mark-to-market PnL, total cash PnL, and net position all sum to zero across all nine agents at every horizon.
 - **Paper synchronisation.** Agent TCA table updated with values regenerated from the v1.2.1 codebase. Kyle λ updated (−5.79, R²=0.0005). Spread decomposition updated (effective 9.89, realized +36.38, adverse −26.51 ticks). New subsection on emergent vs. idiosyncratic agent outcomes added. Pinned benchmark data archived.
 - **README sync.** All values updated to match current codebase output.
 
-### v1.2.1 — Bug fixes
+### v1.2.2 — Bug fixes
 
 - **Fixed double-free heap corruption in Python bindings.** Agent objects registered with `std::unique_ptr<T>` as the pybind11 holder type were deleted both by the C++ `World` destructor and by Python's garbage collector. Fixed by registering all built-in agent classes with `py::nodelete`, making C++ the sole owner. This fix enables multi-seed simulation from a single Python process.
 - **Added `aggressor_side` to `Trade`.** The matching engine now records whether each trade was buyer- or seller-initiated, exposed as `trade.aggressor_side` in Python (`'Buy'` or `'Sell'`). Also available in `result.trades_df()` as the `aggressor_side` column.
