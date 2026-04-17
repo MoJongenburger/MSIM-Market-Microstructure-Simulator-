@@ -8,8 +8,8 @@
   },
   "commit": {
     "tag": "v2.1.1",
-    "sha": "FILL_IN: run  git rev-parse v2.1.1  and paste result here"
-  },
+    "sha": "da38eaac7712f2ba352f34a37820324be7b8cc2e"
+},
   "build_environment": {
     "primary_os": "Windows 11",
     "compiler_windows": "MSVC 19.44",
