@@ -791,6 +791,6 @@ PYBIND11_MODULE(_msim_core, m) {
         .def("expected_is",   &ISAgent::expected_is)
         .def("pct_complete",  &ISAgent::pct_complete);
 
-    m.attr("__version__") = "0.1.0";
+    m.attr("__version__") = "2.1.1";
     m.attr("__author__")  = "MSIM Contributors";
 }
