@@ -108,7 +108,7 @@ A 300-second simulation with 9 agents (5 Hawkes noise traders, Avellaneda-Stoiko
 
 > **Note on price impact:** Kyle's λ is nonzero but R²≈0.0005 at n~800. The A-S market maker continuously re-prices quotes after each fill, causing mean reversion rather than sustained post-trade drift — this attenuates the signal that Kyle's λ captures. The near-zero R² is consistent across all 50 seeds (mean R²=0.003).
 >
-> **Spread decomposition:** The identity effective = realized + adverse selection holds (9.89 ≈ 36.38 + (−26.51) ticks), validating the Huang-Stoll estimator. The negative adverse selection component indicates that prices mean-revert after each fill — a testable prediction of the A-S model's continuous quote re-pricing.
+> **Spread decomposition:** The identity effective = realized + adverse selection holds (9.89 ≈ 36.38 + (−26.51) ticks). The prominent −26.51 ticks figure uses the post-trade mid-price convention, which captures the A-S market maker's mean-reversion and reverses the sign. A fill-level Huang-Stoll decomposition using the order-arrival mid-price gives +1.38 ticks — the economically expected positive adverse selection. Both interpretations are discussed in the paper's TCA section.
 
 ### Multi-Seed Robustness
 
