@@ -690,7 +690,7 @@ If you use MSIM in your research, please cite:
 
 ```bibtex
 @article{jongenburger2026msim,
-  title  = {MSIM: A Sub-50 Nanosecond Deterministic Market Microstructure Simulator in C++20},
+  title  = {MSIM:A Deterministic Limit Order Book Engine for Large-Scale Microstructure Research},
   author = {Jongenburger, Mo},
   year   = {2026},
   note   = {Available at https://github.com/MoJongenburger/MSIM-Market-Microstructure-Simulator-}
